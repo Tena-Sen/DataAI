@@ -157,6 +157,7 @@ class AuthStore:
     def list_sessions(self, username: str) -> list[dict]:
         """列出该用户名下的所有会话（按更新时间倒序）。"""
         prefix = session_prefix(username)
+        tombstones = load_tombstones(username)
         workspace_root = Path(settings.workspace_base_dir)
         state_root = workspace_root / ".session_state"
         sessions: list[dict] = []
@@ -167,8 +168,12 @@ class AuthStore:
                 continue
             if not child.name.startswith(prefix):
                 continue
+            # 已删除的会话：即使目录被轮询请求意外重建，也不再出现在列表中
+            if child.name in tombstones:
+                continue
             state_path = state_root / child.name / "session.json"
             instruction = ""
+            custom_title = ""
             message_count = 0
             updated_at = ""
             if state_path.exists():
@@ -176,6 +181,7 @@ class AuthStore:
                     state = json.loads(state_path.read_text(encoding="utf-8"))
                     task = state.get("task_config") or {}
                     instruction = str(task.get("instruction") or "").strip()
+                    custom_title = str(state.get("custom_title") or "").strip()
                     messages = state.get("messages") or []
                     message_count = len(messages)
                     if not instruction and messages:
@@ -192,6 +198,7 @@ class AuthStore:
                 {
                     "session_id": child.name,
                     "instruction": instruction[:80],
+                    "custom_title": custom_title[:80],
                     "message_count": message_count,
                     "updated_at": updated_at,
                 }
@@ -201,6 +208,36 @@ class AuthStore:
 
 
 store = AuthStore()
+
+
+# ===== 已删除会话墓碑（防止轮询请求重建目录后会话复活） =====
+
+
+def _tombstones_path(username: str) -> Path:
+    base = Path(settings.auth_dir) / "deleted_sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / f"{username}.json"
+
+
+def load_tombstones(username: str) -> set[str]:
+    try:
+        payload = json.loads(_tombstones_path(username).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(item) for item in payload} if isinstance(payload, list) else set()
+
+
+def add_tombstone(username: str, session_id: str) -> None:
+    tombstones = load_tombstones(username)
+    tombstones.add(session_id)
+    with store._lock:
+        path = _tombstones_path(username)
+        temp = path.with_suffix(".tmp")
+        temp.write_text(
+            json.dumps(sorted(tombstones), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temp.replace(path)
 
 
 # ===== 用户级模型配置存储 =====

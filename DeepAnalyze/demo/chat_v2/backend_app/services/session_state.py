@@ -203,6 +203,15 @@ def validate_selected_files(session_id: str, paths: Iterable[str]) -> list[str]:
     return selected
 
 
+def set_custom_title(session_id: str, title: str) -> dict[str, Any]:
+    """设置会话自定义标题（重命名）；空标题则恢复默认（清空 custom_title）。"""
+    sid = validate_session_id(session_id)
+    with _state_lock(sid):
+        state = load_session_state(sid)
+        state["custom_title"] = str(title or "").strip()[:80]
+        return _save_session_state(sid, state)
+
+
 def update_task_config(
     session_id: str,
     task_config: dict[str, Any],

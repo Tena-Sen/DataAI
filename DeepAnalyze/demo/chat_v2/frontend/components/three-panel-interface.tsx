@@ -160,8 +160,8 @@ interface Message {
 
 const getWelcomeMessage = (language: UILanguage) =>
   language === "zh"
-    ? "你好，我是 DeepAnalyze-8B。加载示例数据或上传你的文件，然后直接描述想要得到的分析结论。"
-    : "Hi, I'm DeepAnalyze-8B. Load the sample data or upload your files, then describe the analysis outcome you need.";
+    ? "你好！我可以帮你完成数据分析：上传文件或加载示例数据，用一句话描述你想了解的问题，我会自动查询、分析并生成图表和报告。"
+    : "Hi! I can help you with data analysis: upload your files or load sample data, describe what you want to know in one sentence, and I'll automatically query, analyze, and generate charts and reports.";
 
 interface FileAttachment {
   id: string;
@@ -918,6 +918,7 @@ export function ThreePanelInterface() {
   const [sessionList, setSessionList] = useState<Array<{
       session_id: string;
       instruction: string;
+      custom_title?: string;
       message_count: number;
       updated_at: string;
     }>
@@ -1474,10 +1475,14 @@ export function ThreePanelInterface() {
 
   // 服务端 session state 是主存储，本地缓存仅用于离线回退。
   const [chatLoaded, setChatLoaded] = useState(false);
+  // 同步标记：正在从服务端恢复会话。切换会话瞬间 sessionId 已变、
+  // messages 还是旧会话内容，此时若触发保存会把旧内容写入新会话（污染）。
+  const restoringSessionRef = useRef(false);
 
   useEffect(() => {
     if (!sessionId || typeof window === "undefined") return;
     let cancelled = false;
+    restoringSessionRef.current = true;
     setChatLoaded(false);
     setManualPaused(false);
 
@@ -1551,6 +1556,9 @@ export function ThreePanelInterface() {
         }
         setChatLoaded(true);
       }
+      // 恢复完成（或被取消/401）后解除保存封锁；
+      // 与 setMessages 同批执行，保存 effect 重跑时已可安全保存新内容
+      restoringSessionRef.current = false;
     };
 
     void restoreSession();
@@ -1563,6 +1571,8 @@ export function ThreePanelInterface() {
   useEffect(() => {
     try {
       if (!chatLoaded || !sessionId) return;
+      // 会话恢复中：sessionId 已切换但 messages 还是旧会话内容，禁止保存（防污染）
+      if (restoringSessionRef.current) return;
       if (typeof window === "undefined") return;
 
       if (saveChatTimerRef.current) {
@@ -1692,6 +1702,115 @@ export function ThreePanelInterface() {
       await fetch(API_URLS.AUTH_LOGOUT, { method: "POST" });
     } catch {}
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+  };
+
+  // ===== 删除会话 =====
+
+  const [sessionPendingDelete, setSessionPendingDelete] = useState<{
+    session_id: string;
+    instruction: string;
+  } | null>(null);
+
+  const confirmDeleteSession = async () => {
+    if (!sessionPendingDelete) return;
+    if (isTyping) {
+      toast({ description: "执行中，暂时无法删除", variant: "destructive" });
+      setSessionPendingDelete(null);
+      return;
+    }
+    const targetId = sessionPendingDelete.session_id;
+    const isCurrent = targetId === sessionId;
+    // 立即关闭确认框与下拉菜单
+    setSessionPendingDelete(null);
+    setSessionListOpen(false);
+    // 删除当前会话时：先切到新会话（中止对旧会话的文件轮询），再删除
+    if (isCurrent) {
+      createNewSession();
+    }
+    try {
+      const res = await fetch(
+        `${API_URLS.SESSIONS_DELETE}?session_id=${encodeURIComponent(targetId)}`,
+        { method: "DELETE" }
+      );
+      if (res.status === 401) {
+        window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+        return;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast({
+          description: `删除失败: ${data.detail || res.status}`,
+          variant: "destructive",
+        });
+        return;
+      }
+      // 从本地列表中移除
+      setSessionList((prev) =>
+        prev.filter((item) => item.session_id !== targetId)
+      );
+      // 清理该会话的本地缓存
+      try {
+        localStorage.removeItem(buildSessionStorageKey(targetId));
+        localStorage.removeItem(`collapsedSections:${targetId}`);
+        localStorage.removeItem(`manualLocks:${targetId}`);
+      } catch {}
+      toast({ description: uiLanguage === "zh" ? "会话已删除" : "Session deleted" });
+    } catch (error) {
+      console.error("delete session failed", error);
+      toast({ description: "删除失败：无法连接服务器", variant: "destructive" });
+    }
+  };
+
+  // ===== 重命名会话 =====
+
+  const [sessionRename, setSessionRename] = useState<{
+    session_id: string;
+    title: string;
+  } | null>(null);
+
+  const confirmRenameSession = async () => {
+    if (!sessionRename) return;
+    const targetId = sessionRename.session_id;
+    const title = sessionRename.title.trim();
+    if (!title) {
+      toast({
+        description: uiLanguage === "zh" ? "标题不能为空" : "Title cannot be empty",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      const res = await fetch(API_URLS.SESSIONS_RENAME, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: targetId, title }),
+      });
+      if (res.status === 401) {
+        window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+        return;
+      }
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast({
+          description: `重命名失败: ${data.detail || res.status}`,
+          variant: "destructive",
+        });
+        return;
+      }
+      // 同步更新本地列表
+      setSessionList((prev) =>
+        prev.map((item) =>
+          item.session_id === targetId ? { ...item, custom_title: title } : item
+        )
+      );
+      toast({ description: uiLanguage === "zh" ? "会话已重命名" : "Session renamed" });
+    } catch (error) {
+      console.error("rename session failed", error);
+      toast({ description: "重命名失败：无法连接服务器", variant: "destructive" });
+    } finally {
+      setSessionRename(null);
+      setSessionListOpen(false);
+    }
   };
 
   const formatSessionTime = (iso: string) => {
@@ -6236,7 +6355,7 @@ export function ThreePanelInterface() {
           {/* Left Panel - Workspace Tree */}
           <ResizablePanel defaultSize={25} minSize={20}>
             <div className="flex flex-col min-h-0 min-w-0 h-full bg-white/80 dark:bg-gray-950/80 border-r border-gray-200/70 dark:border-gray-800/70">
-              <div className="flex items-start justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
+              <div className="relative z-20 flex items-start justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
                 <div className="min-w-0">
                   <h2 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
                     {textLabels.workspace}
@@ -6265,7 +6384,7 @@ export function ThreePanelInterface() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-8 px-2 gap-1.5 text-xs text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+                        className="h-8 px-2 gap-1.5 text-xs text-gray-600 hover:text-white dark:text-gray-400 dark:hover:text-black"
                         title={uiLanguage === "zh" ? "会话与账号" : "Sessions & account"}
                       >
                         <User className="h-3.5 w-3.5" />
@@ -6285,31 +6404,75 @@ export function ThreePanelInterface() {
                             {uiLanguage === "zh" ? "暂无历史会话" : "No sessions yet"}
                           </div>
                         )}
-                        {sessionList.map((item) => (
-                          <DropdownMenuItem
+                        {sessionList.map((item) => {
+                          const sessionTitle =
+                            item.custom_title ||
+                            item.instruction ||
+                            (uiLanguage === "zh" ? "（未命名会话）" : "(untitled)");
+                          return (
+                          <div
                             key={item.session_id}
-                            onClick={() => switchSession(item.session_id)}
-                            className={
-                              item.session_id === sessionId
-                                ? "flex-col items-start gap-0.5 bg-accent"
-                                : "flex-col items-start gap-0.5"
-                            }
+                            className="group/session relative"
                           >
-                            <span className="w-full truncate text-xs font-medium">
-                              {item.instruction ||
-                                (uiLanguage === "zh" ? "（未命名会话）" : "(untitled)")}
-                            </span>
-                            <span className="text-[11px] text-gray-500 dark:text-gray-400">
-                              {formatSessionTime(item.updated_at)}
-                              {item.message_count > 0
-                                ? ` · ${item.message_count} ${uiLanguage === "zh" ? "条消息" : "msgs"}`
-                                : ""}
-                              {item.session_id === sessionId
-                                ? uiLanguage === "zh" ? " · 当前" : " · current"
-                                : ""}
-                            </span>
-                          </DropdownMenuItem>
-                        ))}
+                            <DropdownMenuItem
+                              onClick={() => switchSession(item.session_id)}
+                              className="flex-col items-start gap-0.5 pr-14"
+                            >
+                              <span className="w-full truncate text-xs font-medium">
+                                {sessionTitle}
+                              </span>
+                              <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                {formatSessionTime(item.updated_at)}
+                                {item.message_count > 0
+                                  ? ` · ${item.message_count} ${uiLanguage === "zh" ? "条消息" : "msgs"}`
+                                  : ""}
+                                {item.session_id === sessionId
+                                  ? uiLanguage === "zh" ? " · 当前" : " · current"
+                                  : ""}
+                              </span>
+                            </DropdownMenuItem>
+                            <div className="absolute right-1.5 top-1/2 -translate-y-1/2 hidden group-hover/session:flex items-center gap-0.5">
+                              <button
+                                type="button"
+                                title={uiLanguage === "zh" ? "重命名会话" : "Rename session"}
+                                aria-label={uiLanguage === "zh" ? "重命名会话" : "Rename session"}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setSessionRename({
+                                    session_id: item.session_id,
+                                    title: sessionTitle,
+                                  });
+                                }}
+                                className="flex items-center justify-center h-6 w-6 rounded-md text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 dark:hover:text-blue-400 transition-colors"
+                              >
+                                <Edit className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                title={uiLanguage === "zh" ? "删除会话" : "Delete session"}
+                                aria-label={uiLanguage === "zh" ? "删除会话" : "Delete session"}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (isTyping) {
+                                    toast({
+                                      description: "执行中，暂时无法删除",
+                                      variant: "destructive",
+                                    });
+                                    return;
+                                  }
+                                  setSessionPendingDelete({
+                                    session_id: item.session_id,
+                                    instruction: sessionTitle,
+                                  });
+                                }}
+                                className="flex items-center justify-center h-6 w-6 rounded-md text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 dark:hover:text-red-400 transition-colors"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                          );
+                        })}
                       </div>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={createNewSession}>
@@ -6323,6 +6486,94 @@ export function ThreePanelInterface() {
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  {/* 删除会话确认对话框 */}
+                  <AlertDialog
+                    open={!!sessionPendingDelete}
+                    onOpenChange={(open) => {
+                      if (!open) setSessionPendingDelete(null);
+                    }}
+                  >
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          {uiLanguage === "zh" ? "删除会话？" : "Delete session?"}
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {uiLanguage === "zh"
+                            ? `将永久删除该会话的全部消息、生成文件与工作区数据，此操作不可撤销。`
+                            : "This permanently deletes all messages, generated files and workspace data of this session. This action cannot be undone."}
+                          {sessionPendingDelete?.instruction && (
+                            <span className="mt-1 block font-medium break-all line-clamp-3">
+                              {sessionPendingDelete.instruction}
+                            </span>
+                          )}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>
+                          {uiLanguage === "zh" ? "取消" : "Cancel"}
+                        </AlertDialogCancel>
+                        <AlertDialogAction
+                          className="bg-red-600 hover:bg-red-700"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            void confirmDeleteSession();
+                          }}
+                        >
+                          {uiLanguage === "zh" ? "确认删除" : "Delete"}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                  {/* 重命名会话对话框 */}
+                  <Dialog
+                    open={!!sessionRename}
+                    onOpenChange={(open) => {
+                      if (!open) setSessionRename(null);
+                    }}
+                  >
+                    <DialogContent className="sm:max-w-md">
+                      <DialogHeader>
+                        <DialogTitle>
+                          {uiLanguage === "zh" ? "重命名会话" : "Rename session"}
+                        </DialogTitle>
+                        <DialogDescription>
+                          {uiLanguage === "zh"
+                            ? "为该会话设置一个自定义标题。"
+                            : "Set a custom title for this session."}
+                        </DialogDescription>
+                      </DialogHeader>
+                      <Input
+                        autoFocus
+                        value={sessionRename?.title ?? ""}
+                        maxLength={80}
+                        onChange={(event) =>
+                          setSessionRename((prev) =>
+                            prev ? { ...prev, title: event.target.value } : prev
+                          )
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            void confirmRenameSession();
+                          }
+                        }}
+                        placeholder={uiLanguage === "zh" ? "输入新标题" : "Enter new title"}
+                        className="rounded-lg"
+                      />
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          onClick={() => setSessionRename(null)}
+                        >
+                          {uiLanguage === "zh" ? "取消" : "Cancel"}
+                        </Button>
+                        <Button onClick={() => void confirmRenameSession()}>
+                          {uiLanguage === "zh" ? "保存" : "Save"}
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
                 </div>
               </div>
 

@@ -1,0 +1,21 @@
+name: customers
+properties:
+  description: One row per customer.
+table_reference:
+  catalog: jaffle_shop
+  schema: main
+  table: customers
+columns:
+  - name: id
+    type: INTEGER
+    is_calculated: false
+    not_null: true
+    is_primary_key: true
+    properties: {}
+  - name: name
+    type: VARCHAR
+    is_calculated: false
+    not_null: false
+    properties: {}
+primary_key: id
+cached: false

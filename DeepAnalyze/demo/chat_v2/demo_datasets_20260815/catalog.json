@@ -1,0 +1,120 @@
+{
+  "datasets": [
+    {
+      "id": "palmer_penguins",
+      "kind": "single_file",
+      "title": {"zh": "Palmer 企鹅体征", "en": "Palmer Penguins"},
+      "description": {"zh": "344 行、8 列，适合缺失值、分组比较和相关性分析。", "en": "344 rows and 8 columns for missing-value checks, group comparisons, and correlation analysis."},
+      "files": ["single_file/palmer_penguins/penguins.csv"],
+      "questions": [
+        {
+          "id": "species_traits",
+          "title": {"zh": "物种体征差异", "en": "Species trait differences"},
+          "prompt": {
+            "zh": "三种企鹅在体重、鳍长、喙长和喙深上有哪些明显差异？请用一张对比图和一张汇总表回答，并说明如何处理 NA。",
+            "en": "What clear differences do the three penguin species show?"
+          }
+        },
+        {
+          "id": "sex_body_mass",
+          "title": {"zh": "雌雄体重差异", "en": "Body mass by sex"},
+          "prompt": {
+            "zh": "不同物种的雌雄企鹅体重差异有多大？哪些物种的差异最明显？",
+            "en": "How much does body mass differ between female and male penguins within each species, and which species shows the largest difference?"
+          }
+        },
+        {
+          "id": "flipper_body_mass",
+          "title": {"zh": "鳍长与体重", "en": "Flipper length and body mass"},
+          "prompt": {
+            "zh": "企鹅的鳍越长通常会越重吗？分别看三种企鹅时，这种关系是否仍然存在？",
+            "en": "Do penguins with longer flippers tend to weigh more, and does the pattern still hold when each species is considered separately?"
+          }
+        }
+      ]
+    },
+    {
+      "id": "life_expectancy",
+      "kind": "single_file",
+      "title": {"zh": "全球预期寿命", "en": "Global Life Expectancy"},
+      "description": {"zh": "21,565 行长期国家数据，适合趋势、国家比较和异常年份分析。", "en": "21,565 country-year records for trends, cross-country comparisons, and unusual-year analysis."},
+      "files": ["single_file/life_expectancy/life_expectancy.csv", "single_file/life_expectancy/source_metadata.json"],
+      "questions": [
+        {
+          "id": "long_term_gain",
+          "title": {"zh": "长期提升排名", "en": "Long-run improvement ranking"},
+          "prompt": {
+            "zh": "从 1950 年到 2023 年，中国、美国、印度、日本、巴西和南非中哪个国家的预期寿命提升最多？",
+            "en": "From 1950 to 2023, which of China, the United States, India, Japan, Brazil, and South Africa gained the most in life expectancy?"
+          }
+        },
+        {
+          "id": "pandemic_recovery",
+          "title": {"zh": "疫情后恢复", "en": "Post-pandemic recovery"},
+          "prompt": {
+            "zh": "从 2019 年到 2023 年，中国、美国、印度、日本、巴西和南非的预期寿命如何变化？到 2023 年，哪些国家已经回到或超过 2019 年水平？",
+            "en": "How did life expectancy change from 2019 to 2023 in China, the United States, India, Japan, Brazil, and South Africa, and which countries had returned to or exceeded their 2019 level by 2023?"
+          }
+        }
+      ]
+    },
+    {
+      "id": "bike_sharing",
+      "kind": "multi_file",
+      "title": {"zh": "共享单车需求", "en": "Bike Sharing Demand"},
+      "description": {"zh": "日表与小时表，可演示跨文件一致性、时序和高峰模式。", "en": "Daily and hourly tables for cross-file consistency, time-series, and peak-pattern analysis."},
+      "files": ["multi_file/bike_sharing/day.csv", "multi_file/bike_sharing/hour.csv", "multi_file/bike_sharing/Readme.txt"],
+      "questions": [
+        {
+          "id": "file_consistency",
+          "title": {"zh": "日表与小时表核对", "en": "Daily-hourly reconciliation"},
+          "prompt": {
+            "zh": "这两份数据记录的每日骑行量一致吗？如果有差异，主要出现在哪些日期和用户类型？",
+            "en": "Do the two files report the same daily ride totals? If not, on which dates and for which user types do the main differences appear?"
+          }
+        },
+        {
+          "id": "annual_growth",
+          "title": {"zh": "年度增长", "en": "Annual growth"},
+          "prompt": {
+            "zh": "2012 年的共享单车使用量比 2011 年增长了多少？注册用户和临时用户的增长情况有什么不同？",
+            "en": "How much did bike-sharing usage grow in 2012 compared with 2011, and how did the growth differ between registered and casual users?"
+          }
+        },
+        {
+          "id": "hourly_peaks",
+          "title": {"zh": "工作日与非工作日高峰", "en": "Working and non-working day peaks"},
+          "prompt": {
+            "zh": "工作日和非工作日的骑行高峰分别在几点？一天中的使用模式有什么不同？",
+            "en": "At what times does bike-sharing usage peak on working and non-working days, and how do their daily usage patterns differ?"
+          }
+        },
+        {
+          "id": "weather_demand",
+          "title": {"zh": "天气与骑行量", "en": "Weather and ride demand"},
+          "prompt": {
+            "zh": "不同天气状况下的共享单车使用量有什么差别？哪些天气下骑行量最高或最低，这些结果的数据量是否充足？",
+            "en": "How does bike-sharing usage vary with the weather? Which conditions have the highest and lowest ride volumes, and is there enough data for each comparison?"
+          }
+        }
+      ]
+    },
+    {
+      "id": "college_majors",
+      "kind": "multi_file",
+      "title": {"zh": "大学专业与就业", "en": "College Majors and Careers"},
+      "description": {"zh": "四张相关表，适合字段关联、收入、失业率与人群口径比较。", "en": "Four related tables for joins, earnings, unemployment, and population-definition comparisons."},
+      "files": ["multi_file/college_majors/recent-grads.csv", "multi_file/college_majors/all-ages.csv", "multi_file/college_majors/grad-students.csv", "multi_file/college_majors/majors-list.csv"],
+      "questions": [
+        {
+          "id": "major_shortlist",
+          "title": {"zh": "高收入低失业专业", "en": "High-earning, low-unemployment majors"},
+          "prompt": {
+            "zh": "在 recent-grads 中筛选 Median 不低于 50000 且 Unemployment_rate 低于 0.05 的专业，并按 Median 从高到低列出。",
+            "en": "In recent-grads, filter for majors with Median at least 50000 and Unemployment_rate below 0.05, then list them in descending order of Median."
+          }
+        }
+      ]
+    }
+  ]
+}

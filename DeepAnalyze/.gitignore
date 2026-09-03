@@ -1,0 +1,32 @@
+# System files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Python files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+.cursor/
+.vscode/
+.trae/
+
+#other
+**/.claude/
+**/workspace/
+**/CLAUDE.md
+**/logs/
+*.env
+*.env.local
+*.env.development
+*.env.production
+*.env.test

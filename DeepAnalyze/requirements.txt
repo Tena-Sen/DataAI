@@ -1,0 +1,20 @@
+# vllm>=0.8.5
+numpy
+pandas
+openpyxl
+scikit-learn
+seaborn
+torch
+transformers
+matplotlib
+plotly
+statsmodels
+
+# Web UI
+requests
+websockets
+python-multipart
+uvicorn
+fastapi
+openai
+pypandoc

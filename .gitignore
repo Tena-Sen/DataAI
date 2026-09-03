@@ -1,0 +1,32 @@
+# ===== 依赖与构建产物 =====
+.venv/
+node_modules/
+.next/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== 日志 =====
+logs/
+*.log
+
+# ===== 运行时用户数据（会话记录/账号凭据，不入库）=====
+DeepAnalyze/demo/chat_v2/auth/
+DeepAnalyze/demo/chat_v2/workspace/
+
+# ===== 环境配置（本地各服务端口等）=====
+.env
+
+# ===== 本地 IDE / 系统 =====
+.trae/
+.DS_Store
+Thumbs.db
+
+# ===== 第三方上游克隆（未做修改，需要时可从上游重新 clone）=====
+# WrenAI: https://github.com/Canner/WrenAI.git
+# jaffle_shop_duckdb: https://github.com/dbt-labs/jaffle_shop_duckdb.git
+WrenAI/
+jaffle_shop_duckdb/
+
+# ===== DeepAnalyze 上游 git 历史本地备份（已改名，不入库）=====
+DeepAnalyze/.git.upstream.bak/

@@ -1,0 +1,3 @@
+datasource: duckdb
+url: D:\DataAI
+format: duckdb

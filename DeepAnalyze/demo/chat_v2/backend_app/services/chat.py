@@ -1261,6 +1261,22 @@ def bot_stream(
                     code_execution_count,
                 )
             yield outcome.execution_content
+            # 观测点：本轮代码是否调用 wren_remember()（仅匹配实参调用，不含 def 行）
+            remember_calls = re.findall(r"(?m)^\s*wren_remember\s*\(", code_str)
+            if remember_calls:
+                logger.info(
+                    "memory.registered session_id=%s round=%s count=%s",
+                    session_id,
+                    round_count,
+                    len(remember_calls),
+                )
+            else:
+                # 让"模型未调用"也变成可观测信号：info 级，单行便于 grep
+                logger.info(
+                    "memory.skipped session_id=%s round=%s reason=no_wren_remember_call",
+                    session_id,
+                    round_count,
+                )
 
             if interaction_mode == "manual":
                 return

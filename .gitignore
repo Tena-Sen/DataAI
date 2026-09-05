@@ -22,11 +22,31 @@ DeepAnalyze/demo/chat_v2/workspace/
 .DS_Store
 Thumbs.db
 
-# ===== 第三方上游克隆（未做修改，需要时可从上游重新 clone）=====
-# WrenAI: https://github.com/Canner/WrenAI.git
-# jaffle_shop_duckdb: https://github.com/dbt-labs/jaffle_shop_duckdb.git
-WrenAI/
-jaffle_shop_duckdb/
+# ===== 第三方上游克隆 =====
+# WrenAI: https://github.com/Canner/WrenAI.git （项目子目录，随项目入库）
+# jaffle_shop_duckdb: https://github.com/dbt-labs/jaffle_shop_duckdb.git （项目子目录，随项目入库）
+
+# ---- WrenAI 子目录内的本地构建产物（仓库根 .gitignore 不递归到子模块，
+#      但 WrenAI 自己的 .gitignore 也只在它自己的仓库里生效，所以这里再显式排除一次）----
+WrenAI/.venv/
+WrenAI/**/.venv/
+WrenAI/**/target/
+WrenAI/**/node_modules/
+WrenAI/**/__pycache__/
+WrenAI/**/*.pyc
+WrenAI/**/*.pyd
+WrenAI/**/*.so
+WrenAI/**/*.egg-info/
+WrenAI/**/build/
+WrenAI/**/dist/
+WrenAI/**/*.sqlite
+WrenAI/**/*.sqlite3
+WrenAI/**/local_cache/
+WrenAI/**/.tmp/
+WrenAI/.claude/worktrees/
+WrenAI/**/.claude/worktrees/
+WrenAI/.git
+WrenAI/**/.git
 
 # ===== DeepAnalyze 上游 git 历史本地备份（已改名，不入库）=====
 DeepAnalyze/.git.upstream.bak/

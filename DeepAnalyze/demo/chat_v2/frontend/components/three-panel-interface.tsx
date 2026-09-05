@@ -1397,6 +1397,8 @@ export function ThreePanelInterface() {
   >([]);
   const [memoryPairs, setMemoryPairs] = useState<MemoryPair[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
+  // 本轮 user_message 估算的"会被召回"的条数（前端近似，真实值见后端日志）
+  const [lastRecalledCount, setLastRecalledCount] = useState(0);
   // 记忆编辑器：null=关闭；file 为空 = 新增
   const [memoryEdit, setMemoryEdit] = useState<{
     file: string;
@@ -2153,6 +2155,66 @@ export function ThreePanelInterface() {
     }
   }, [sessionId]);
 
+  // 前端估算"本轮 user_message 会召回到多少条记忆"。
+  // 这是 best-effort 近似（用 bigram + datasource 命中 + 子串；不调用 fastembed）。
+  // 真实值以后端 logs/backend.log 里 memory.recalled kept=N 为准。
+  // 用于"查询记忆"面板的状态徽章，让用户直观感知召回是否在工作。
+  const estimateRecalled = useCallback(
+    (userMessage: string, pairs: MemoryPair[]): number => {
+      const q = (userMessage || "").trim().toLowerCase();
+      if (!q || pairs.length === 0) return 0;
+      // 字符 bigram（中文友好，与后端 _char_bigrams 对齐）
+      const qBigrams = new Set<string>();
+      for (let i = 0; i < q.length - 1; i++) {
+        const bg = q.slice(i, i + 2);
+        if (bg.trim()) qBigrams.add(bg);
+      }
+      if (qBigrams.size === 0) return 0;
+      // 当前 session 的 datasource 集合（用 workspaceFiles 里上传的文件名）
+      const currentSources = new Set(
+        (workspaceFiles || [])
+          .map((f) => (f.name || "").replace(/\.[^.]+$/, "").trim().toLowerCase())
+          .filter(Boolean)
+      );
+      // 给每条 pair 打分（保留简化版后端算法）
+      const scored = pairs.map((p) => {
+        const nl = (p.nl || "").toLowerCase();
+        let s = 0;
+        if (nl && (q.includes(nl) || nl.includes(q))) s += 10;
+        const nlBg = new Set<string>();
+        for (let i = 0; i < nl.length - 1; i++) {
+          const bg = nl.slice(i, i + 2);
+          if (bg.trim()) nlBg.add(bg);
+        }
+        let common = 0;
+        qBigrams.forEach((b) => {
+          if (nlBg.has(b)) common++;
+        });
+        s += (6 * common) / qBigrams.size;
+        const ds = (p.datasource || "").replace(/\.[^.]+$/, "").trim().toLowerCase();
+        if (ds && currentSources.has(ds) && s > 0) s += 8;
+        return { score: s, datasource: p.datasource || "" };
+      });
+      // 简易门槛 5.0（与后端 MIN_RECALL_SCORE 对齐），top-3
+      const top = scored
+        .filter((x) => x.score >= 5)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3);
+      // 跨数据集降权（datasource 不在 currentSources 时 ×0.3）— 不强制丢，
+      // 但被降权的条目若没被强信号救回，前端也按"未达标"处理
+      const kept = top.filter(
+        (x) =>
+          x.score >= 5 &&
+          (!x.datasource ||
+            currentSources.size === 0 ||
+            currentSources.has(x.datasource.replace(/\.[^.]+$/, "").trim().toLowerCase()) ||
+            x.score >= 15) // 跨数据集但分数足够高（强词法/语义命中）才保留
+      );
+      return kept.length;
+    },
+    [workspaceFiles]
+  );
+
   const forgetMemoryPair = useCallback(
     async (file: string) => {
       if (!sessionId) return;
@@ -2227,6 +2289,7 @@ export function ThreePanelInterface() {
     setSemanticExcluded([]);
     setSemanticRelationships([]);
     setExpandedSemanticTables(new Set());
+    setLastRecalledCount(0);
     if (sessionId) {
       void loadSemanticLayer();
       void loadMemoryPairs();
@@ -6286,6 +6349,8 @@ export function ThreePanelInterface() {
     if (!resumePending && !inputValue.trim() && attachments.length === 0) return;
     if (resumePending) setManualPaused(false);
     const additionalInstruction = resumePending ? inputValue.trim() : "";
+    // 估算本轮会召回到多少条记忆（前端近似，徽章展示用）
+    setLastRecalledCount(estimateRecalled(inputValue, memoryPairs));
     const shouldAppendUserMessage = resumePending
       ? !!additionalInstruction
       : !!inputValue.trim() || attachments.length > 0;
@@ -8211,6 +8276,24 @@ export function ThreePanelInterface() {
                           {memoryPairs.length > 0 && (
                             <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[11px] shrink-0">
                               {memoryPairs.length}
+                            </Badge>
+                          )}
+                          {/* 本轮估算召回条数（前端近似，仅作状态指示）
+                              - 仅在用户发过消息后显示
+                              - 真实值以 backend.log 里 memory.recalled kept=N 为准 */}
+                          {lastRecalledCount > 0 && (
+                            <Badge
+                              variant="outline"
+                              title={
+                                uiLanguage === "zh"
+                                  ? `本轮 user_message 估算命中 ${lastRecalledCount} 条记忆（前端近似）`
+                                  : `Estimated ${lastRecalledCount} recalled for this turn (client-side approximation)`
+                              }
+                              className="rounded-full px-2 py-0.5 text-[11px] shrink-0 border-blue-300 text-blue-700 dark:text-blue-300 dark:border-blue-700"
+                            >
+                              {uiLanguage === "zh"
+                                ? `本轮 ≈ ${lastRecalledCount}`
+                                : `this turn ≈ ${lastRecalledCount}`}
                             </Badge>
                           )}
                         </div>

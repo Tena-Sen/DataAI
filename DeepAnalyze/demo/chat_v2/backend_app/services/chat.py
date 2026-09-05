@@ -731,6 +731,13 @@ def _build_user_prompt(
             )
         except Exception:
             recalled = []
+        # 观测点：召回了几条，便于排查"幻觉"是召回带来的还是模型自己编的
+        logger.info(
+            "memory.recalled session_id=%s kept=%d nls=%s",
+            session_id,
+            len(recalled),
+            [str(p.get("nl") or "")[:40] for p in recalled],
+        )
         if recalled:
             memory_lines = [
                 "",

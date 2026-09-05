@@ -1063,6 +1063,32 @@ def recall_similar_queries(
         elif score >= 2.0:  # 词法模式阈值：中文改写 bigram 重叠率通常 0.3-0.6
             scored.append((score, pair))
     scored.sort(key=lambda item: (-item[0], str(item[1].get("nl") or "")))
+    # ---- 后置过滤：挡掉"勉强匹配"和"跨 schema 误命中" ----
+    # 1) 跨 schema 误命中：记忆里登记的 datasource 不在当前 mdl 的表集合里，
+    #    整条直接降权（不强丢，因为有些合法记忆 datasource 字段是空的）
+    if table_names:
+        filtered: list[tuple[float, dict]] = []
+        for s, p in scored:
+            ds = _normalize_memory_datasource(p.get("datasource"))
+            if ds and ds not in table_names:
+                # 跨数据集召回：原分乘 0.3（大幅降权），但仍可在强语义命中时被拉回
+                s *= 0.3
+            filtered.append((s, p))
+        scored = filtered
+        scored.sort(key=lambda item: (-item[0], str(item[1].get("nl") or "")))
+    # 2) 最低分门槛：原打分上限是 10+6+6+8+10 = 40（满命中），top score 通常 > 5
+    #    设置 5.0 保底：低于此说明词法/语义都很弱，宁可空召回也别塞噪声
+    MIN_RECALL_SCORE = 5.0
+    pre_filter_count = len(scored)
+    scored = [(s, p) for s, p in scored if s >= MIN_RECALL_SCORE]
+    # 观测点：上游 caller 会再打一条 kept=N；这里记录"被门槛过滤掉的条目"
+    # 便于调试"为什么有记忆却没召回"
+    if pre_filter_count and not scored:
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "memory.recall_filtered_all session_id=%s candidates=%d (all below min_score=%.1f)",
+            session_id, pre_filter_count, MIN_RECALL_SCORE,
+        )
     return [pair for _, pair in scored[: max(1, limit)]]
 
 

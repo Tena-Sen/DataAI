@@ -741,7 +741,7 @@ def _build_user_prompt(
                 memory_lines.append(f"- 问题: {pair.get('nl')}")
                 memory_lines.append(f"  SQL: {' '.join(str(pair.get('sql') or '').split())}")
             memory_lines.append(
-                "本会话中，某条 wren_query 成功且该问题值得复用时，调用 `wren_remember(\"<自然语言问题>\", \"<SQL>\", datasource=\"<数据文件名>\")` 登记到记忆库。"
+                "采用这些参考后，请在最终答案对应的 wren_query 成功后调用 `wren_remember(\"<自然语言问题>\", \"<SQL>\", datasource=\"<数据文件名>\")` 登记 —— 把本轮最终 SQL（不是参考里的原 SQL）覆盖登记回去，这样下次就能直接召回本 session 真实可用的写法。"
             )
             messages[-1]["content"] += "\n".join(memory_lines)
 
@@ -763,7 +763,7 @@ def _build_session_semantic_context(layer: SemanticLayer) -> str:
         "分析这些数据时：",
         '- `wren_query("<SQL>")` — 用 SQL 查询上传数据，如 `wren_query("SELECT 销售人员, SUM(金额) AS 总额 FROM 销售流水 GROUP BY 销售人员")`',
         '- `wren_dry_run("<SQL>")` — 执行前校验 SQL（不取数）',
-        '- `wren_remember("<自然语言问题>", "<SQL>", datasource="<数据文件名>")` — 仅登记**经验证成功且有明确业务含义**的查询（勿登记临时/探索性 SQL），登记后跨会话自动作为参考召回',
+        '- `wren_remember("<自然语言问题>", "<SQL>", datasource="<数据文件名>")` — **每次 wren_query 成功返回非空 DataFrame 后都必须调用一次**（同一轮多步仅在最终答案对应的 SQL 上登记一次）。判定标准：①该查询回答了用户本轮的核心问题；②SQL 引用了本 session 语义层中的表（`datasource` 填上传时的文件名，如 `销售明细.csv`）；③不是临时探查（如 SELECT * LIMIT 5）。登记后下次/跨 session 相似问题会自动作为参考召回，省去重复摸索',
         "大规模聚合、多表 JOIN 优先用 wren_query（比 pandas 逐块读更省内存）；需要复杂 Python 处理时仍可直接用 pandas 读原文件。两条路径数据一致。",
         "",
         "## 数据模型清单",

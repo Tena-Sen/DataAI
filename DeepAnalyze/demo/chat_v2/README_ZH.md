@@ -125,32 +125,19 @@ Agent 自动生成的 `<Code>` 与代码工作台手动复跑统一经过同一�
 
 ## 如何运行
 
-### Linux / macOS
-
-```bash
-cd demo/chat_v2
-bash start.sh
-```
-
-停止：
-
-```bash
-cd demo/chat_v2
-bash stop.sh
-```
+唯一的启动入口是仓库根目录下的 `start-all.ps1`（Windows），Linux/macOS 等价命令。`demo/chat_v2/` 下不再保留任何启动/停止脚本。
 
 ### Windows
 
-```bat
-cd demo\chat
-start.bat
+```powershell
+# 在仓库根目录 (D:\DataAI) 执行：
+powershell -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
 停止：
 
-```bat
-cd demo\chat
-stop.bat
+```powershell
+powershell -ExecutionPolicy Bypass -File stop-all.ps1
 ```
 
 默认地址：

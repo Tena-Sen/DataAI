@@ -163,32 +163,21 @@ session API.
 
 ## Run
 
-### Linux / macOS
-
-```bash
-cd demo/chat_v2
-bash start.sh
-```
-
-Stop:
-
-```bash
-cd demo/chat_v2
-bash stop.sh
-```
+The single canonical entry point is `D:\DataAI\start-all.ps1` (Windows) or the
+equivalent shell invocation on Linux/macOS. There are no per-project start/stop
+scripts in `demo/chat_v2/`.
 
 ### Windows
 
-```bat
-cd demo\chat_v2
-start.bat
+```powershell
+# From the repo root (D:\DataAI):
+powershell -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
 Stop:
 
-```bat
-cd demo\chat_v2
-stop.bat
+```powershell
+powershell -ExecutionPolicy Bypass -File stop-all.ps1
 ```
 
 Default addresses after startup:

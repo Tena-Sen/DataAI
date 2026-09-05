@@ -1399,6 +1399,10 @@ export function ThreePanelInterface() {
   const [memoryLoading, setMemoryLoading] = useState(false);
   // 本轮 user_message 估算的"会被召回"的条数（前端近似，真实值见后端日志）
   const [lastRecalledCount, setLastRecalledCount] = useState(0);
+  // 本轮召回到的记忆 NL 集合（用于卡片高亮）
+  const [recalledNls, setRecalledNls] = useState<Set<string>>(new Set());
+  // 是否已对当前 session 做过至少一次估算（false = 还没发过消息，徽章不显示）
+  const [hasEstimatedRecall, setHasEstimatedRecall] = useState(false);
   // 记忆编辑器：null=关闭；file 为空 = 新增
   const [memoryEdit, setMemoryEdit] = useState<{
     file: string;
@@ -2159,17 +2163,25 @@ export function ThreePanelInterface() {
   // 这是 best-effort 近似（用 bigram + datasource 命中 + 子串；不调用 fastembed）。
   // 真实值以后端 logs/backend.log 里 memory.recalled kept=N 为准。
   // 用于"查询记忆"面板的状态徽章，让用户直观感知召回是否在工作。
+  // 返回 { count, nls }：nls 是被召回到的 NL 集合（用于卡片高亮）
   const estimateRecalled = useCallback(
-    (userMessage: string, pairs: MemoryPair[]): number => {
+    (
+      userMessage: string,
+      pairs: MemoryPair[]
+    ): { count: number; nls: Set<string> } => {
       const q = (userMessage || "").trim().toLowerCase();
-      if (!q || pairs.length === 0) return 0;
+      const empty: { count: number; nls: Set<string> } = {
+        count: 0,
+        nls: new Set<string>(),
+      };
+      if (!q || pairs.length === 0) return empty;
       // 字符 bigram（中文友好，与后端 _char_bigrams 对齐）
       const qBigrams = new Set<string>();
       for (let i = 0; i < q.length - 1; i++) {
         const bg = q.slice(i, i + 2);
         if (bg.trim()) qBigrams.add(bg);
       }
-      if (qBigrams.size === 0) return 0;
+      if (qBigrams.size === 0) return empty;
       // 当前 session 的 datasource 集合（用 workspaceFiles 里上传的文件名）
       const currentSources = new Set(
         (workspaceFiles || [])
@@ -2193,7 +2205,7 @@ export function ThreePanelInterface() {
         s += (6 * common) / qBigrams.size;
         const ds = (p.datasource || "").replace(/\.[^.]+$/, "").trim().toLowerCase();
         if (ds && currentSources.has(ds) && s > 0) s += 8;
-        return { score: s, datasource: p.datasource || "" };
+        return { score: s, datasource: p.datasource || "", nl: p.nl || "" };
       });
       // 简易门槛 5.0（与后端 MIN_RECALL_SCORE 对齐），top-3
       const top = scored
@@ -2210,7 +2222,8 @@ export function ThreePanelInterface() {
             currentSources.has(x.datasource.replace(/\.[^.]+$/, "").trim().toLowerCase()) ||
             x.score >= 15) // 跨数据集但分数足够高（强词法/语义命中）才保留
       );
-      return kept.length;
+      const nls = new Set<string>(kept.map((k) => k.nl));
+      return { count: kept.length, nls };
     },
     [workspaceFiles]
   );
@@ -2290,6 +2303,8 @@ export function ThreePanelInterface() {
     setSemanticRelationships([]);
     setExpandedSemanticTables(new Set());
     setLastRecalledCount(0);
+    setRecalledNls(new Set());
+    setHasEstimatedRecall(false);
     if (sessionId) {
       void loadSemanticLayer();
       void loadMemoryPairs();
@@ -6349,8 +6364,13 @@ export function ThreePanelInterface() {
     if (!resumePending && !inputValue.trim() && attachments.length === 0) return;
     if (resumePending) setManualPaused(false);
     const additionalInstruction = resumePending ? inputValue.trim() : "";
-    // 估算本轮会召回到多少条记忆（前端近似，徽章展示用）
-    setLastRecalledCount(estimateRecalled(inputValue, memoryPairs));
+    // 估算本轮会召回到多少条记忆（前端近似，徽章展示用 + 卡片高亮）
+    {
+      const { count, nls } = estimateRecalled(inputValue, memoryPairs);
+      setLastRecalledCount(count);
+      setRecalledNls(nls);
+      setHasEstimatedRecall(true);
+    }
     const shouldAppendUserMessage = resumePending
       ? !!additionalInstruction
       : !!inputValue.trim() || attachments.length > 0;
@@ -8279,23 +8299,37 @@ export function ThreePanelInterface() {
                             </Badge>
                           )}
                           {/* 本轮估算召回条数（前端近似，仅作状态指示）
-                              - 仅在用户发过消息后显示
-                              - 真实值以 backend.log 里 memory.recalled kept=N 为准 */}
-                          {lastRecalledCount > 0 && (
+                              - 仅在用户发过消息后显示（hasEstimatedRecall）
+                              - 真实值以 backend.log 里 memory.recalled kept=N 为准
+                              - count=0 时仍显示（淡灰），让用户看到"召回是工作的，
+                                只是本轮没命中"；count>0 时蓝色高亮 */}
+                          {hasEstimatedRecall ? (
                             <Badge
                               variant="outline"
                               title={
                                 uiLanguage === "zh"
-                                  ? `本轮 user_message 估算命中 ${lastRecalledCount} 条记忆（前端近似）`
-                                  : `Estimated ${lastRecalledCount} recalled for this turn (client-side approximation)`
+                                  ? lastRecalledCount > 0
+                                    ? `本轮 user_message 估算命中 ${lastRecalledCount} 条记忆（前端近似，被召回的卡片会被淡蓝高亮）`
+                                    : "本轮估算 0 条命中（防护生效 / 问题与记忆库无关，真实值以后端日志为准）"
+                                  : lastRecalledCount > 0
+                                    ? `Estimated ${lastRecalledCount} recalled for this turn (client-side approximation)`
+                                    : "Estimated 0 recalled this turn (filter active or unrelated question)"
                               }
-                              className="rounded-full px-2 py-0.5 text-[11px] shrink-0 border-blue-300 text-blue-700 dark:text-blue-300 dark:border-blue-700"
+                              className={
+                                lastRecalledCount > 0
+                                  ? "rounded-full px-2 py-0.5 text-[11px] shrink-0 border-blue-300 text-blue-700 dark:text-blue-300 dark:border-blue-700"
+                                  : "rounded-full px-2 py-0.5 text-[11px] shrink-0 border-gray-300 text-gray-500 dark:text-gray-400 dark:border-gray-700"
+                              }
                             >
                               {uiLanguage === "zh"
-                                ? `本轮 ≈ ${lastRecalledCount}`
-                                : `this turn ≈ ${lastRecalledCount}`}
+                                ? lastRecalledCount > 0
+                                  ? `本轮 ≈ ${lastRecalledCount}`
+                                  : "本轮 = 0"
+                                : lastRecalledCount > 0
+                                  ? `this turn ≈ ${lastRecalledCount}`
+                                  : "this turn = 0"}
                             </Badge>
-                          )}
+                          ) : null}
                         </div>
                         <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                           {uiLanguage === "zh"
@@ -8343,10 +8377,23 @@ export function ThreePanelInterface() {
                             : "No memories yet. Queries registered by the model will appear here."}
                       </div>
                     ) : (
-                      memoryPairs.map((pair) => (
+                      memoryPairs.map((pair) => {
+                        const isRecalled = recalledNls.has(pair.nl);
+                        return (
                         <div
                           key={pair.file}
-                          className="rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2 group"
+                          className={
+                            isRecalled
+                              ? "rounded-xl border border-blue-300 dark:border-blue-700 px-3 py-2 group bg-blue-50/60 dark:bg-blue-950/30"
+                              : "rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2 group"
+                          }
+                          title={
+                            isRecalled
+                              ? uiLanguage === "zh"
+                                ? "本轮被召回到（前端估算）"
+                                : "Recalled this turn (client-side estimate)"
+                              : undefined
+                          }
                         >
                           <div className="flex items-start gap-2">
                             <div className="min-w-0 flex-1">
@@ -8395,7 +8442,8 @@ export function ThreePanelInterface() {
                             {pair.sql}
                           </div>
                         </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                 </Card>

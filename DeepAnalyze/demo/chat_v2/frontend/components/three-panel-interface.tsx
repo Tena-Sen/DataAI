@@ -2203,8 +2203,11 @@ export function ThreePanelInterface() {
           if (nlBg.has(b)) common++;
         });
         s += (6 * common) / qBigrams.size;
+        // 数据源加权：要求词面分 >= 3（不含本加权）才生效，
+        // 避免 "2019/中国" 等弱撞词被无条件 +8 抬过 5.0 阈值。
+        // 同时把 +8 降为 +5，单条数据源命中最高拉到 ~10（强词法命中 + 数据源）
         const ds = (p.datasource || "").replace(/\.[^.]+$/, "").trim().toLowerCase();
-        if (ds && currentSources.has(ds) && s > 0) s += 8;
+        if (ds && currentSources.has(ds) && s >= 3) s += 5;
         return { score: s, datasource: p.datasource || "", nl: p.nl || "" };
       });
       // 简易门槛 5.0（与后端 MIN_RECALL_SCORE 对齐），top-3

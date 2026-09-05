@@ -1039,10 +1039,12 @@ def recall_similar_queries(
             score += 6.0 * len(q_bigrams & nl_bigrams) / len(q_bigrams)
         datasource = str(pair.get("datasource") or "").strip()
         # 同数据源（同上传文件）是强信号，但仅在文本相似度非零时加成：
-        # 否则完全无关的问题也会因数据源相同而入选
+        # 否则完全无关的问题也会因数据源相同而入选。
+        # 进一步收紧：词面分 < 3 时不加成（避免 "2019/中国" 等弱撞词被
+        # 数据源命中抬过 5.0 阈值）；加成分数从 +8 降到 +5。
         normalized_ds = _normalize_memory_datasource(datasource)
-        if normalized_ds and normalized_ds in table_names and score > 0:
-            score += 8.0
+        if normalized_ds and normalized_ds in table_names and score >= 3.0:
+            score += 5.0
         if q_vec is not None:
             # 语义模式：门槛即 gate（cosine 过滤），词法分作为排序加成
             p_vec = _pair_vector(embedder, pair)  # type: ignore[arg-type]

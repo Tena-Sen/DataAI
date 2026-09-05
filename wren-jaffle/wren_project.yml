@@ -1,6 +1,0 @@
-schema_version: 5
-name: jaffle_shop
-catalog: jaffle_shop
-schema: main
-data_source: duckdb
-profile: jaffle

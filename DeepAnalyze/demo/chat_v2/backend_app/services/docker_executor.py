@@ -513,6 +513,12 @@ def ensure_execution_backend_ready(session_id: str | None = None) -> None:
                 str(settings.docker_pids_limit),
                 "-v",
                 f"{session_workspace}:{settings.docker_workspace_dir}:rw",
+        ]
+        # 用户级查询记忆目录：宿主机 workspace/_memory/<用户> → 容器 /wren-memory
+        memory_mount = _memory_mount_for_session(validated_session_id)
+        if memory_mount is not None:
+            docker_args += ["-v", f"{memory_mount[0]}:{memory_mount[1]}:rw"]
+        docker_args += [
                 "-w",
                 settings.docker_workspace_dir,
         ]
@@ -563,6 +569,23 @@ def _resolve_container_workdir(workspace_dir: str, session_id: str) -> str:
     return str(PurePosixPath(settings.docker_workspace_dir) / relative_dir.as_posix())
 
 
+# 容器内用户级查询记忆目录挂载点（宿主机 workspace/_memory/<用户> → /wren-memory）
+_DOCKER_MEMORY_MOUNT_TARGET = "/wren-memory"
+
+
+def _memory_mount_for_session(session_id: str) -> tuple[str, str] | None:
+    """返回 (宿主机路径, 容器路径)；无法解析归属用户时不挂载。"""
+    from .semantic_builder import user_memory_project_dir
+
+    try:
+        project = user_memory_project_dir(session_id)
+    except Exception:
+        return None
+    if project is None:
+        return None
+    return str(project), _DOCKER_MEMORY_MOUNT_TARGET
+
+
 def execute_python_in_docker(
     script_path: str,
     workspace_dir: str,
@@ -576,24 +599,38 @@ def execute_python_in_docker(
     script_name = Path(script_path).name
 
     try:
+        # session 语义层目录（容器内路径）；文件存在性由执行侧 bootstrap 校验
+        wren_session_dir = (
+            f"{settings.docker_workspace_dir}/.deepanalyze/wren"
+        )
+        # 用户级查询记忆目录：容器创建时按需挂载到 /wren-memory（未挂载时不注入 env，
+        # wren_remember 会优雅降级返回 unavailable）
+        docker_exec_args = [
+            "docker",
+            "exec",
+            "-e",
+            "MPLBACKEND=Agg",
+            "-e",
+            "MPLCONFIGDIR=/tmp/matplotlib",
+            "-e",
+            "QT_QPA_PLATFORM=offscreen",
+            "-e",
+            "HOME=/tmp",
+            "-e",
+            f"DEEPANALYZE_WREN_SESSION_DIR={wren_session_dir}",
+        ]
+        memory_mount = _memory_mount_for_session(session_id)
+        if memory_mount is not None:
+            docker_exec_args += ["-e", f"WREN_PROJECT_HOME={memory_mount[1]}"]
+        docker_exec_args += [
+            "-w",
+            container_workdir,
+            container_name,
+            settings.docker_python_bin,
+            script_name,
+        ]
         process = subprocess.Popen(
-            [
-                "docker",
-                "exec",
-                "-e",
-                "MPLBACKEND=Agg",
-                "-e",
-                "MPLCONFIGDIR=/tmp/matplotlib",
-                "-e",
-                "QT_QPA_PLATFORM=offscreen",
-                "-e",
-                "HOME=/tmp",
-                "-w",
-                container_workdir,
-                container_name,
-                settings.docker_python_bin,
-                script_name,
-            ],
+            docker_exec_args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from datetime import datetime
 
 from fastapi import APIRouter, Body, HTTPException
@@ -11,6 +13,7 @@ from ..services.chat import (
     begin_session_run_stop_event,
     bot_stream,
     build_chat_runtime_config,
+    is_session_run_active,
     release_session_run,
     request_stop,
     try_acquire_session_run,
@@ -31,6 +34,7 @@ from ..settings import settings
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/execute")
@@ -102,6 +106,26 @@ async def chat(body: dict = Body(...)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     interaction_mode = "manual" if body.get("interaction_mode") == "manual" else "auto"
+    # 前端自主调节的 Agent 预算：轮次 / 时长（秒），非法输入直接 400 提示
+    def _parse_budget_int(key: str, minimum: int, maximum: int) -> int | None:
+        raw = body.get(key)
+        if raw is None or raw == "":
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"{key} must be an integer"
+            ) from exc
+        if not minimum <= value <= maximum:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key} must be between {minimum} and {maximum}",
+            )
+        return value
+
+    max_rounds = _parse_budget_int("max_rounds", 1, 200)
+    max_duration_sec = _parse_budget_int("max_duration_sec", 60, 21600)
     resume_pending = body.get("resume_pending") is True
     pending_continuation = load_pending_continuation(session_id) if resume_pending else None
     if resume_pending and pending_continuation is None:
@@ -147,6 +171,8 @@ async def chat(body: dict = Body(...)):
 
     def generate():
         assistant_parts: list[str] = []
+        started_at = time.monotonic()
+        end_reason = "completed"
         try:
             for delta_content in bot_stream(
                 messages,
@@ -156,6 +182,8 @@ async def chat(body: dict = Body(...)):
                 interaction_mode=interaction_mode,
                 resume_state=pending_continuation,
                 additional_instruction=str(body.get("additional_instruction") or ""),
+                max_rounds=max_rounds,
+                max_duration_sec=max_duration_sec,
             ):
                 assistant_parts.append(delta_content)
                 chunk = {
@@ -174,9 +202,47 @@ async def chat(body: dict = Body(...)):
                 yield json.dumps(chunk) + "\n"
         except GeneratorExit:
             # Client disconnected: stop the analysis instead of letting it run on.
+            # 在已保存的消息尾部留下中断标记，重新打开会话时能看到停在这里的原因。
+            end_reason = "client_disconnected"
             request_stop(session_id)
+            assistant_parts.append(
+                "\n<Execute>\n[Interrupted]: 客户端连接中断，分析提前停止。"
+                "可直接发送“继续”接着分析。\n</Execute>\n"
+            )
             raise
+        except Exception as exc:
+            # 任何未预期异常都必须留下可见反馈 + 服务端日志，不再无声断流
+            end_reason = "error"
+            logger.exception("chat_stream_error session_id=%s", session_id)
+            error_block = (
+                f"\n<Execute>\n[Error]: 分析过程发生内部错误：{exc}\n</Execute>\n"
+            )
+            assistant_parts.append(error_block)
+            try:
+                error_chunk = {
+                    "id": "chatcmpl-stream",
+                    "object": "chat.completion.chunk",
+                    "created": 1677652288,
+                    "model": runtime_config.model or settings.model_path,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": error_block},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield json.dumps(error_chunk) + "\n"
+            except Exception:
+                pass  # 客户端可能已断开，至少保证内容已保存
         finally:
+            logger.warning(
+                "chat_stream_end session_id=%s reason=%s duration=%.1fs chars=%d",
+                session_id,
+                end_reason,
+                time.monotonic() - started_at,
+                sum(len(part) for part in assistant_parts),
+            )
             if assistant_parts:
                 upsert_message(
                     session_id,
@@ -212,6 +278,12 @@ async def chat(body: dict = Body(...)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/chat/running")
+async def chat_running(session_id: str = "default"):
+    """前端校准用：该会话后端是否真有分析在跑。"""
+    return {"running": is_session_run_active(session_id)}
 
 
 @router.post("/chat/stop")

@@ -4,8 +4,8 @@ import re
 from dataclasses import dataclass
 
 
-ACTION_TAGS = ("Analyze", "Understand", "Code", "Execute", "Answer", "File")
-MODEL_ACTION_TAGS = frozenset({"Analyze", "Understand", "Code", "Answer"})
+ACTION_TAGS = ("Analyze", "Understand", "Code", "Execute", "Answer", "File", "ConsultWren", "WrenReply")
+MODEL_ACTION_TAGS = frozenset({"Analyze", "Understand", "Code", "Answer", "ConsultWren"})
 ACTION_TAG_PATTERN = "|".join(ACTION_TAGS)
 ACTION_OPEN_RE = re.compile(rf"<({ACTION_TAG_PATTERN})>")
 ACTION_CLOSE_RE = re.compile(rf"</({ACTION_TAG_PATTERN})>")
@@ -96,11 +96,13 @@ def validate_model_actions(content: str) -> list[ActionSection]:
             f"model emitted system-owned action <{unsupported[0]}>"
         )
 
-    terminal_actions = [action for action in actions if action.tag in {"Code", "Answer"}]
+    terminal_actions = [
+        action for action in actions if action.tag in {"Code", "Answer", "ConsultWren"}
+    ]
     if len(terminal_actions) != 1:
-        raise ProtocolValidationError("exactly one terminal <Code> or <Answer> action is required")
+        raise ProtocolValidationError("exactly one terminal <Code>, <Answer> or <ConsultWren> action is required")
     if actions[-1] != terminal_actions[0]:
-        raise ProtocolValidationError("terminal <Code> or <Answer> action must be last")
+        raise ProtocolValidationError("terminal <Code>, <Answer> or <ConsultWren> action must be last")
     return actions
 
 
@@ -146,7 +148,9 @@ def normalize_model_output(content: str) -> tuple[str, list[ActionSection]]:
         return ACTION_CLOSE_RE.sub("", ACTION_OPEN_RE.sub("", body)).strip()
 
     terminals = [
-        section for section in complete_sections if section.tag in {"Code", "Answer"}
+        section
+        for section in complete_sections
+        if section.tag in {"Code", "Answer", "ConsultWren"}
     ]
     if terminals:
         terminal = terminals[-1]
@@ -225,7 +229,7 @@ def contains_completed_action(content: str, tag: str) -> bool:
 
 def find_completed_action_end(
     content: str,
-    tags: tuple[str, ...] = ("Code", "Answer"),
+    tags: tuple[str, ...] = ("Code", "Answer", "ConsultWren"),
 ) -> int | None:
     """返回内容中第一个完整终止动作的边界位置。"""
     masked = mask_backticked_content(content or "")

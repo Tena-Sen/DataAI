@@ -33,7 +33,16 @@ from .workspace import (
     uniquify_path,
     validate_session_id,
 )
-from ..settings import CHINESE_MATPLOTLIB_BOOTSTRAP, WREN_QUERY_BOOTSTRAP, settings
+from ..settings import (
+    CHINESE_MATPLOTLIB_BOOTSTRAP,
+    WREN_QUERY_BOOTSTRAP,
+    settings,
+)
+from .semantic_builder import (
+    SemanticLayer,
+    ensure_semantic_layer,
+    recall_similar_queries,
+)
 
 
 client = openai.OpenAI(base_url=settings.api_base, api_key="dummy")
@@ -60,10 +69,10 @@ _ACTION_TAG_AT_START_RE = re.compile(
     r"^\s*</?[A-Za-z][^>]*>",
 )
 _MODEL_ACTION_TAG_AT_START_RE = re.compile(
-    r"^<(?:Analyze|Understand|Code|Answer)>",
+    r"^<(?:Analyze|Understand|Code|Answer|ConsultWren)>",
 )
-_MODEL_ACTION_TAG_RE = re.compile(r"<(?:Analyze|Understand|Code|Answer)>")
-_MODEL_ACTION_CLOSE_TAG_RE = re.compile(r"</(?:Analyze|Understand|Code|Answer)>")
+_MODEL_ACTION_TAG_RE = re.compile(r"<(?:Analyze|Understand|Code|Answer|ConsultWren)>")
+_MODEL_ACTION_CLOSE_TAG_RE = re.compile(r"</(?:Analyze|Understand|Code|Answer|ConsultWren)>")
 @dataclass(frozen=True)
 class ChatRuntimeConfig:
     provider: str = "local"
@@ -78,6 +87,88 @@ def _is_deepanalyze_model(model_name: str) -> bool:
     if not normalized:
         return False
     return bool(re.search(r"deep[\s\-_]*analyze", normalized))
+
+
+# ---------- 长对话上下文压缩 ----------
+# conversation 每轮追加代码 + 执行输出（单轮输出上限 32KB），无压缩时 30 轮
+# 可达数十万字符，超出模型窗口后请求失败/质量崩塌。策略：
+#   1) 执行输出入 conversation 前先截断（保留头尾 + 行数说明）
+#   2) 总量超预算时折叠最旧的代码轮次（Analyze/Understand 保留，Code 轮次
+#      的 assistant 消息缩为一行摘要、执行输出缩为头尾采样）
+# 最近 _COMPACT_KEEP_RECENT 轮始终保留原文；首轮 user prompt（含语义层清单）不动。
+
+_CONTEXT_BUDGET_CHARS = 120_000  # ≈ 3-4 万 token（中文为主），给输出留余量
+_CONTEXT_HARD_TRUNCATE_CHARS = 16_000  # 单条执行输出入上下文的上限
+_COMPACT_KEEP_RECENT = 4  # 保底不折叠的最近消息数（assistant+user 至少 1 轮）
+
+
+def _truncate_execution_output_for_context(text: str) -> str:
+    """执行输出入 conversation 前的截断：保头尾，中间注明省略量。"""
+    text = str(text or "")
+    if len(text) <= _CONTEXT_HARD_TRUNCATE_CHARS:
+        return text
+    keep = _CONTEXT_HARD_TRUNCATE_CHARS // 2
+    head = text[:keep].rstrip()
+    tail = text[-keep:].lstrip()
+    omitted = len(text) - len(head) - len(tail)
+    return f"{head}\n\n... [执行输出已截断：中间省略 {omitted} 字符] ...\n\n{tail}"
+
+
+def _message_is_recent_contextual(content: str) -> bool:
+    """消息是否承载持续有效的上下文（语义层/记忆参考/编目指令）。"""
+    for marker in (
+        "# Semantic Layer",
+        "# Query Memory",
+        "# Data\n",
+        "# Instruction\n",
+    ):
+        if marker in content:
+            return True
+    return False
+
+
+def _compact_conversation(conversation: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """总量超预算时折叠旧的代码轮次；返回原列表（就地修改，避免引用失效）。
+
+    折叠规则（从最旧往新扫描，直到总量回到预算内）：
+    - assistant 消息含 <Code> → 摘要化（保留动作标签结构，正文缩为一行）
+    - user 消息以 EXECUTE_RESULT_PREFIX 开头且很长 → 头尾采样
+    - 承载持续上下文的消息（语义层/记忆/数据清单）永不折叠
+    """
+    total = sum(len(str(m.get("content") or "")) for m in conversation)
+    if total <= _CONTEXT_BUDGET_CHARS:
+        return conversation
+    # 折叠执行输出时按缺口决定保留量：缺口越大压得越狠（1.2K-4K 头尾采样）
+    overflow_ratio = min(1.0, (total - _CONTEXT_BUDGET_CHARS) / max(total, 1))
+    keep = max(1_200, int(4_000 * (1.0 - overflow_ratio)))
+    for index in range(len(conversation) - _COMPACT_KEEP_RECENT):
+        if total <= _CONTEXT_BUDGET_CHARS:
+            break
+        message = conversation[index]
+        content = str(message.get("content") or "")
+        if not content or _message_is_recent_contextual(content):
+            continue
+        role = message.get("role")
+        if role == "assistant" and "<Code>" in content:
+            lines = [ln for ln in content.splitlines() if ln.strip()]
+            first = lines[0][:120] if lines else ""
+            new_content = (
+                f"<Understand>\n[context compacted] 早期代码轮次已折叠以控制上下文长度。"
+                f"该轮起始内容：{first}\n</Understand>"
+            )
+            conversation[index] = {"role": role, "content": new_content}
+            total -= len(content) - len(new_content)
+        elif role == "user" and content.startswith(EXECUTE_RESULT_PREFIX):
+            if len(content) > keep * 2:
+                head = content[:keep].rstrip()
+                tail = content[-keep:].lstrip()
+                omitted = len(content) - len(head) - len(tail)
+                new_content = (
+                    f"{head}\n... [执行结果已折叠：省略 {omitted} 字符] ...\n{tail}"
+                )
+                conversation[index] = {"role": role, "content": new_content}
+                total -= len(content) - len(new_content)
+    return conversation
 
 
 def _build_execution_feedback_message(
@@ -258,6 +349,17 @@ def wait_for_session_run_release(session_id: str, timeout_sec: float) -> bool:
     return True
 
 
+def is_session_run_active(session_id: str) -> bool:
+    """该会话当前是否有正在运行的分析（供前端校准运行状态，自愈卡死 spinner）。"""
+    try:
+        sid = validate_session_id(session_id)
+    except ValueError:
+        return False
+    with _SESSION_RUN_LOCKS_LOCK:
+        lock = _SESSION_RUN_LOCKS.get(sid)
+    return bool(lock and lock.locked())
+
+
 def _execution_status_block(kind: str, message: str) -> str:
     logger.warning("analysis_status kind=%s message=%s", kind, message)
     return f"\n<Execute>\n[{kind}]: {message}\n</Execute>\n"
@@ -365,6 +467,10 @@ def build_chat_runtime_config(payload: dict[str, Any] | None) -> ChatRuntimeConf
         provider = "local"
 
     api_base = str(body.get("api_base") or "").strip()
+    # 容错：用户配置漏写协议前缀时自动补 https://（否则 httpx 报
+    # "Request URL is missing an 'http://' or 'https://' protocol"）
+    if api_base and "://" not in api_base:
+        api_base = f"https://{api_base}"
     if provider == "heywhale" and not api_base:
         api_base = HEYWHALE_API_BASE
     if provider == "custom" and not api_base:
@@ -590,6 +696,7 @@ def _build_user_prompt(
     workspace_dir: str,
     *,
     use_all_files_when_empty: bool,
+    session_id: str = "default",
 ) -> None:
     if not messages or messages[-1].get("role") != "user":
         return
@@ -605,6 +712,109 @@ def _build_user_prompt(
     else:
         messages[-1]["content"] = f"# Instruction\n{user_message}"
 
+    # session 语义层（上传数据自动构建）：注入表/列清单与 wren_query 用法
+    session_layer = ensure_semantic_layer(session_id)
+    if session_layer is not None:
+        session_context = _build_session_semantic_context(session_layer)
+        if session_context:
+            messages[-1]["content"] += f"\n\n{session_context}"
+        # 用户级查询记忆：召回与当前问题相似的历史 NL→SQL（跨会话复用，省重复摸索）
+        # 传表名 + 源文件名（datasource 登记的是文件名，如 订单 (1).csv）
+        match_sources = [
+            model["name"] for model in session_layer.models
+        ] + [
+            model.get("source_file") for model in session_layer.models if model.get("source_file")
+        ]
+        try:
+            recalled = recall_similar_queries(
+                session_id, user_message, current_tables=match_sources, limit=3
+            )
+        except Exception:
+            recalled = []
+        if recalled:
+            memory_lines = [
+                "",
+                "# Query Memory (历史查询参考，可能来自其他数据集)",
+                "以下历史查询与当前问题相似。表名/列名可能与本会话不同：仅供参考，改写后先用 `wren_dry_run` 验证。",
+            ]
+            for pair in recalled:
+                memory_lines.append(f"- 问题: {pair.get('nl')}")
+                memory_lines.append(f"  SQL: {' '.join(str(pair.get('sql') or '').split())}")
+            memory_lines.append(
+                "本会话中，某条 wren_query 成功且该问题值得复用时，调用 `wren_remember(\"<自然语言问题>\", \"<SQL>\", datasource=\"<数据文件名>\")` 登记到记忆库。"
+            )
+            messages[-1]["content"] += "\n".join(memory_lines)
+
+
+_MAX_MODELS_IN_PROMPT = 15
+_MAX_COLUMNS_IN_PROMPT = 30
+_MAX_RELATIONSHIPS_IN_PROMPT = 10
+
+
+def _build_session_semantic_context(layer: SemanticLayer) -> str:
+    """session 语义层清单：表/列/含义 + wren_query 用法。
+
+    列含义来自 AI 编目（wren_describe 写回的数据字典）；尚未编目时
+    附上编目指引（先采样推断含义再分析），编目歧义向用户提问。
+    """
+    lines = [
+        "# Semantic Layer (session data)",
+        "本次上传的数据已自动注册为语义层（DuckDB 引擎），表名/列名与原文件一致（已清理为合法标识符，中文保留）。",
+        "分析这些数据时：",
+        '- `wren_query("<SQL>")` — 用 SQL 查询上传数据，如 `wren_query("SELECT 销售人员, SUM(金额) AS 总额 FROM 销售流水 GROUP BY 销售人员")`',
+        '- `wren_dry_run("<SQL>")` — 执行前校验 SQL（不取数）',
+        '- `wren_remember("<自然语言问题>", "<SQL>", datasource="<数据文件名>")` — 仅登记**经验证成功且有明确业务含义**的查询（勿登记临时/探索性 SQL），登记后跨会话自动作为参考召回',
+        "大规模聚合、多表 JOIN 优先用 wren_query（比 pandas 逐块读更省内存）；需要复杂 Python 处理时仍可直接用 pandas 读原文件。两条路径数据一致。",
+        "",
+        "## 数据模型清单",
+    ]
+    cataloged_tables = 0
+    shown_models = layer.models[:_MAX_MODELS_IN_PROMPT]
+    for model in shown_models:
+        lines.append(f"- **{model['name']}** — {model['description']}")
+        columns = model["columns"]
+        if any(c.get("desc") for c in columns):
+            cataloged_tables += 1
+        parts: list[str] = []
+        for column in columns[:_MAX_COLUMNS_IN_PROMPT]:
+            desc = column.get("desc")
+            parts.append(
+                f"{column['name']}（{desc}）" if desc else f"{column['name']} {column['type']}"
+            )
+        shown = ", ".join(parts)
+        if len(columns) > _MAX_COLUMNS_IN_PROMPT:
+            shown += f", …（共 {len(columns)} 列，用 `wren_query(\"SELECT * FROM {model['name']} LIMIT 5\")` 查看全部）"
+        lines.append(f"  列: {shown}")
+    if len(layer.models) > _MAX_MODELS_IN_PROMPT:
+        lines.append(f"- …（共 {len(layer.models)} 个模型，其余省略）")
+
+    # 表间关系（同名列自动推断）：多表 JOIN 时直接可用，省去逐轮试探
+    if layer.relationships:
+        lines += [
+            "",
+            "## 表间关系（自动推断）",
+            "以下 JOIN 关系由跨表同名键列推断，业务上不一定成立；使用前可 `wren_dry_run` 验证，明显不合理时以数据为准：",
+        ]
+        for rel in layer.relationships[:_MAX_RELATIONSHIPS_IN_PROMPT]:
+            lines.append(f"- {rel['condition']}")
+        if len(layer.relationships) > _MAX_RELATIONSHIPS_IN_PROMPT:
+            lines.append(f"- …（共 {len(layer.relationships)} 条，其余省略）")
+
+    # 指引只针对本轮实际展示的模型（省略部分模型不参与编目判断）
+    uncataloged = len(shown_models) - cataloged_tables
+    if uncataloged > 0:
+        lines += [
+            "",
+            "## 数据编目（本轮优先做，与任务相关的表）",
+            "以上部分表还没有列含义登记。在开始分析前，先对**与任务相关的表**编目：",
+            "1. 采样查看数据（如 `wren_query(\"SELECT * FROM 表名 LIMIT 5\")`，枚举列可加 `GROUP BY`）",
+            "2. 推断每列的业务含义（单位、口径、枚举值语义，如“status=A 表示什么”）",
+            "3. 调用 `wren_describe(\"表名\", {\"列名\": \"含义\", ...})` 登记 —— 登记后本轮及后续所有分析自动使用，无需重复推断",
+            "4. **对影响分析结论且无法从数据本身推断的歧义**（单位不明、口径有二义、枚举值语义不明），不要臆测：在给用户的回复中明确列出这些问题请其确认，得到答复后再登记或使用",
+            "编目完成后继续执行分析任务。",
+        ]
+    return "\n".join(lines)
+
 
 def _extract_code_to_execute(code_content: str) -> str | None:
     if not code_content:
@@ -617,7 +827,7 @@ def _extract_code_to_execute(code_content: str) -> str | None:
     )
     code_str = md_match.group(1).strip() if md_match else code_content
     bootstraps: list[str] = []
-    if re.search(r"\bwren_query\s*\(", code_str):
+    if re.search(r"\bwren_(?:query|dry_run|describe|remember)\s*\(", code_str):
         bootstraps.append(WREN_QUERY_BOOTSTRAP)
     if re.search(r"(^|\W)(plt\.|matplotlib|sns\.|seaborn)", code_str, re.IGNORECASE):
         bootstraps.append(CHINESE_MATPLOTLIB_BOOTSTRAP)
@@ -735,8 +945,19 @@ def bot_stream(
     interaction_mode: str = "auto",
     resume_state: dict[str, Any] | None = None,
     additional_instruction: str = "",
+    max_rounds: int | None = None,
+    max_duration_sec: int | None = None,
 ):
     runtime_config = runtime_config or ChatRuntimeConfig()
+    # 前端可按请求覆盖预算（chat_max_rounds / chat_max_duration_sec），非法值回退全局配置
+    rounds_budget = (
+        max_rounds if isinstance(max_rounds, int) and max_rounds > 0 else settings.chat_max_rounds
+    )
+    duration_budget = (
+        max_duration_sec
+        if isinstance(max_duration_sec, int) and max_duration_sec > 0
+        else settings.chat_max_duration_sec
+    )
     interaction_mode = "manual" if interaction_mode == "manual" else "auto"
     session_id = validate_session_id(session_id)
     session_lock = try_acquire_session_run(session_id)
@@ -782,7 +1003,7 @@ def bot_stream(
             )
             started_at = time.monotonic() - min(
                 elapsed_seconds,
-                float(settings.chat_max_duration_sec),
+                float(duration_budget),
             )
             clear_pending_continuation(session_id)
             logger.info(
@@ -804,6 +1025,7 @@ def bot_stream(
                 workspace_paths,
                 workspace_dir,
                 use_all_files_when_empty=workspace is None,
+                session_id=session_id,
             )
             round_count = 0
             code_execution_count = 0
@@ -815,19 +1037,22 @@ def bot_stream(
         while not finished:
             if stop_event.is_set():
                 break
-            if time.monotonic() - started_at >= settings.chat_max_duration_sec:
+            if time.monotonic() - started_at >= duration_budget:
                 yield _execution_status_block(
                     "Budget Exceeded",
-                    f"analysis exceeded {settings.chat_max_duration_sec} seconds",
+                    f"analysis exceeded {duration_budget} seconds",
                 )
                 break
-            if round_count >= settings.chat_max_rounds:
+            if round_count >= rounds_budget:
                 yield _execution_status_block(
                     "Budget Exceeded",
-                    f"analysis exceeded {settings.chat_max_rounds} model rounds",
+                    f"analysis exceeded {rounds_budget} model rounds",
                 )
                 break
             round_count += 1
+            logger.warning(
+                "analysis_round_start session_id=%s round=%d", session_id, round_count
+            )
 
             cur_res = ""
             initial_stream_state = _InitialStreamState()
@@ -865,10 +1090,10 @@ def bot_stream(
                 ):
                     if stop_event.is_set():
                         break
-                    if time.monotonic() - started_at >= settings.chat_max_duration_sec:
+                    if time.monotonic() - started_at >= duration_budget:
                         yield _execution_status_block(
                             "Budget Exceeded",
-                            f"analysis exceeded {settings.chat_max_duration_sec} seconds",
+                            f"analysis exceeded {duration_budget} seconds",
                         )
                         finished = True
                         break
@@ -982,6 +1207,24 @@ def bot_stream(
                 finished = True
                 continue
 
+            # 语义层咨询：模型用 <ConsultWren> 提问时返回 session 数据模型清单
+            if terminal_action.tag == "ConsultWren":
+                conversation.append({"role": "assistant", "content": cur_res})
+                layer = ensure_semantic_layer(session_id)
+                reply = (
+                    _build_session_semantic_context(layer)
+                    if layer is not None
+                    else "当前 session 无上传数据语义层。请直接用 pandas 读取工作区文件。"
+                )
+                reply_block = f"\n<WrenReply>\n{reply}\n</WrenReply>\n"
+                yield reply_block
+                conversation.append(
+                    _build_execution_feedback_message(runtime_config, reply)
+                )
+                if stop_event.is_set():
+                    break
+                continue
+
             code_execution_count += 1
             conversation.append({"role": "assistant", "content": cur_res})
             code_str = _extract_code_to_execute(terminal_action.body)
@@ -991,7 +1234,7 @@ def bot_stream(
 
             remaining_seconds = max(
                 1,
-                settings.chat_max_duration_sec - int(time.monotonic() - started_at),
+                duration_budget - int(time.monotonic() - started_at),
             )
             outcome = execute_managed_code(
                 code_str,
@@ -1023,9 +1266,17 @@ def bot_stream(
                 return
 
             conversation.append(
-                _build_execution_feedback_message(runtime_config, outcome.result)
+                _build_execution_feedback_message(
+                    runtime_config,
+                    _truncate_execution_output_for_context(outcome.result),
+                )
             )
+            # 长对话压缩：总量超预算时折叠最旧代码轮次（就地修改，最近轮保留原文）
+            _compact_conversation(conversation)
             if stop_event.is_set():
+                yield _execution_status_block(
+                    "Stopped", "analysis was stopped after code execution"
+                )
                 break
 
             current_files = {

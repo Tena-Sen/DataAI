@@ -110,6 +110,52 @@ def build_preview_url(rel_path: str) -> str:
     return _build_workspace_transfer_url(rel_path, download=False)
 
 
+def _extract_docx_text(file_path: Path, max_chars: int = 50000) -> str:
+    """纯标准库提取 .docx 段落文本（zip + document.xml，无需 python-docx）。
+
+    表格单元格文本用 " | " 连接，段落保留换行。
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        with zipfile.ZipFile(file_path) as archive:
+            xml_bytes = archive.read("word/document.xml")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return ""
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return ""
+
+    def paragraph_text(paragraph) -> str:
+        return "".join(node.text or "" for node in paragraph.iter(f"{{{ns['w']}}}t"))
+
+    lines: list[str] = []
+    body = root.find("w:body", ns)
+    if body is None:
+        return ""
+    for child in body:
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            text = paragraph_text(child)
+            if text.strip():
+                lines.append(text)
+        elif tag == "tbl":  # 表格：每行单元格以 " | " 连接
+            for row in child.findall("w:tr", ns):
+                cells = []
+                for cell in row.findall("w:tc", ns):
+                    cell_text = " ".join(
+                        paragraph_text(p) for p in cell.findall("w:p", ns)
+                    ).strip()
+                    cells.append(cell_text)
+                if any(cells):
+                    lines.append(" | ".join(cells))
+    content = "\n".join(lines)
+    return content[:max_chars]
+
+
 def _generated_index_path(workspace_root: Path) -> Path:
     return workspace_root / "generated" / GENERATED_INDEX_FILENAME
 
@@ -176,6 +222,31 @@ def register_generated_paths(session_id: str, rel_paths: Iterable[str]) -> set[s
     )
     save_generated_index(session_id, generated)
     return generated
+
+
+def unregister_generated_paths(
+    session_id: str, rel_paths: Iterable[str], *, prefix: str = ""
+) -> None:
+    """从生成索引移除条目（用户删除文件/目录时调用）。
+
+    不清理会导致：删除分析产物 csv 后重传同名文件（作为新数据源），
+    语义层仍按旧索引排除它。prefix 用于目录删除（移除该目录下所有条目）。
+    """
+    current = load_generated_index(session_id)
+    removed = {
+        _normalize_generated_rel_path(str(path))
+        for path in rel_paths
+        if _normalize_generated_rel_path(str(path))
+    }
+    prefix_normalized = _normalize_generated_rel_path(prefix)
+    remaining = {
+        path
+        for path in current
+        if path not in removed
+        and not (prefix_normalized and path.startswith(prefix_normalized + "/"))
+    }
+    if remaining != current:
+        save_generated_index(session_id, remaining)
 
 
 def collect_file_info(source: str | Path | Sequence[str | Path]) -> str:
@@ -424,6 +495,21 @@ def preview_workspace_file(
             "truncated": len(content) > 50000,
         }
 
+    if ext == ".docx":
+        # Word 文档：纯标准库提取段落/表格文本（.doc 老二进制格式仍走下载）
+        content = _extract_docx_text(file_path)
+        if content:
+            return {
+                "kind": "text",
+                "title": file_path.name,
+                "content": content,
+                "truncated": len(content) >= 50000,
+            }
+        raise HTTPException(
+            status_code=415,
+            detail="docx text extraction failed; download to view",
+        )
+
     if ext in {".csv", ".tsv"}:
         separator = "\t" if ext == ".tsv" else ","
         dataframe = pd.read_csv(file_path, sep=separator)
@@ -435,11 +521,14 @@ def preview_workspace_file(
         )
 
     if ext in {".xlsx", ".xls"}:
-        workbook = pd.ExcelFile(file_path)
-        active_sheet = sheet_name or workbook.sheet_names[0]
-        if active_sheet not in workbook.sheet_names:
-            raise HTTPException(status_code=404, detail="Sheet not found")
-        dataframe = workbook.parse(sheet_name=active_sheet)
+        # 上下文管理器确保关闭底层句柄：ExcelFile 不关闭会一直占用文件，
+        # Windows 上导致后续删除报 WinError 32（文件被占用）
+        with pd.ExcelFile(file_path) as workbook:
+            active_sheet = sheet_name or workbook.sheet_names[0]
+            if active_sheet not in workbook.sheet_names:
+                raise HTTPException(status_code=404, detail="Sheet not found")
+            dataframe = workbook.parse(sheet_name=active_sheet)
+            sheet_names = list(workbook.sheet_names)
         return _build_paginated_preview(
             dataframe,
             title=file_path.name,
@@ -447,7 +536,7 @@ def preview_workspace_file(
             page_size=page_size,
             extra={
                 "sheet_name": active_sheet,
-                "sheet_names": workbook.sheet_names,
+                "sheet_names": sheet_names,
             },
         )
 
@@ -743,7 +832,12 @@ def delete_workspace_file(session_id: str, relative_path: str) -> dict:
         raise HTTPException(status_code=404, detail="Not found")
     if target.is_dir():
         raise HTTPException(status_code=400, detail="Folder deletion not allowed")
+    rel_posix = (
+        target.resolve().relative_to(resolve_workspace_root(session_id)).as_posix()
+    )
     target.unlink()
+    # 同步清理生成索引：否则删除产物后重传同名文件会被语义层继续排除
+    unregister_generated_paths(session_id, [rel_posix])
     return {"message": "deleted"}
 
 
@@ -771,10 +865,13 @@ def delete_workspace_dir(session_id: str, relative_path: str, recursive: bool = 
         raise HTTPException(status_code=404, detail="Not found")
     if not target.is_dir():
         raise HTTPException(status_code=400, detail="Not a directory")
+    rel_posix = target.resolve().relative_to(workspace_root).as_posix()
     if recursive:
         shutil.rmtree(target)
     else:
         target.rmdir()
+    # 目录删除：清理该目录下所有生成索引条目
+    unregister_generated_paths(session_id, [], prefix=rel_posix)
     return {"message": "deleted"}
 
 

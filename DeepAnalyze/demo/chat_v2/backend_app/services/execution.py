@@ -59,6 +59,25 @@ def execute_code_safe(
         child_env.setdefault("MPLBACKEND", "Agg")
         child_env.setdefault("QT_QPA_PLATFORM", "offscreen")
         child_env.pop("DISPLAY", None)
+        # session 语义层：激活 wren_query 对上传数据的定向路由（文件存在性由 bootstrap 校验）
+        child_env["DEEPANALYZE_WREN_SESSION_DIR"] = str(
+            Path(exec_cwd) / ".deepanalyze" / "wren"
+        )
+        # 用户级 NL→SQL 记忆 project：激活生成代码里的 wren_remember()（wren CLI
+        # memory store 经 WREN_PROJECT_HOME 定位 knowledge/sql/ 目录）
+        from .semantic_builder import user_memory_project_dir
+
+        memory_project = user_memory_project_dir(session_id)
+        if memory_project is not None:
+            child_env["WREN_PROJECT_HOME"] = str(memory_project)
+        # wren 查询常驻服务地址 + 鉴权 token（健康时注入；连不上自动回退 CLI）
+        from .wren_service import service_address_if_running
+
+        wren_service = service_address_if_running()
+        if wren_service is not None:
+            child_env["DEEPANALYZE_WREN_SERVICE"] = wren_service[0]
+            if wren_service[1]:
+                child_env["DEEPANALYZE_WREN_SERVICE_TOKEN"] = wren_service[1]
 
         popen_kwargs: dict = {}
         if os.name == "nt":

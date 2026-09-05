@@ -21,6 +21,19 @@ export function getUsername(): string {
   return localStorage.getItem("da_username") || "";
 }
 
+function safeUserSegment(username: string): string {
+  const trimmed = (username || "").trim();
+  return trimmed || "anonymous";
+}
+
+export function userScopedKey(username: string, baseKey: string): string {
+  const user = safeUserSegment(username);
+  if (baseKey.startsWith("deepanalyze.")) {
+    return `deepanalyze.user.${user}.${baseKey.slice("deepanalyze.".length)}`;
+  }
+  return `deepanalyze.user.${user}.${baseKey}`;
+}
+
 type Status = "loading" | "anonymous" | "authenticated";
 
 export function AuthGate({ children }: { children: React.ReactNode }) {

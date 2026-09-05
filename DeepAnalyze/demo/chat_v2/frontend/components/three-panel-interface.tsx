@@ -132,8 +132,9 @@ import {
   CirclePause,
   Settings2,
   LogOut,
+  BookMarked,
 } from "lucide-react";
-import { UNAUTHORIZED_EVENT, getUsername } from "@/components/auth-gate";
+import { UNAUTHORIZED_EVENT, getUsername, userScopedKey } from "@/components/auth-gate";
 import { Tree, NodeApi } from "react-arborist";
 import { useToast } from "@/hooks/use-toast";
 import { FileIcon, defaultStyles } from "react-file-icon";
@@ -355,26 +356,30 @@ The system will interact with you as follows:
 
 ---
 
-# WrenAI Semantic Layer (Governed Data Access)
+# WrenAI Semantic Layer (Uploaded-Data SQL Access)
 
-This environment is connected to the **WrenAI semantic layer**. Business data must be queried through the pre-defined \`wren_query(sql)\` function (automatically available in every \`<Code>\` block, no import needed). It returns a **pandas DataFrame** and enforces governed, metric-consistent SQL:
+Data files (CSV/Excel) uploaded in this session are automatically registered into a DuckDB semantic layer. Their tables and columns are listed in a "# Semantic Layer (session data)" block inside the user message. Query them with the pre-defined \`wren_query(sql)\` function (automatically available in every \`<Code>\` block, no import needed). It returns a **pandas DataFrame**:
 
 \`\`\`python
-df = wren_query("SELECT customer_name, SUM(amount) AS revenue FROM customer_orders GROUP BY customer_name ORDER BY revenue DESC LIMIT 10")
+df = wren_query("SELECT some_column, SUM(numeric_column) AS total FROM table_name GROUP BY some_column")
 print(df.head())
 \`\`\`
 
-Available semantic objects (SQL must use these names, not raw table names):
-
-- Models: \`orders\` (id, customer_id, amount), \`customers\` (id, name)
-- View: \`customer_orders\` (customer_name, order_id, amount)
-- Cube \`order_metrics\`: measures \`total_revenue\` (SUM of amount), \`order_count\` (COUNT *)
-
 Rules:
 
-- Prefer \`wren_query\` for business metrics; read workspace files only for data outside the semantic layer.
+- Use the exact table/column names from the session semantic layer context; never invent table names.
+- Prefer \`wren_query\` for large aggregations and multi-table JOINs (DuckDB engine, memory-friendly); use pandas when complex Python processing is needed. Both paths see the same data.
+- \`wren_dry_run(sql)\` validates SQL without executing it (returns None when valid).
 - Pass \`limit=\` for exploratory queries to keep result sets small (e.g. \`limit=100\`).
-- If a query fails, read the error message, fix the SQL, and retry with corrected semantic names.
+- If no session semantic layer context is present, read the workspace files with pandas directly.
+
+# Data Cataloging (Business Meaning)
+
+Column meanings are the key to correct analysis. When the semantic layer context lists tables whose columns have no registered meanings (the context will tell you):
+
+1. Before deep analysis, catalog the **task-relevant** tables: sample the data (\`wren_query("SELECT * FROM table LIMIT 5")\`, \`GROUP BY\` for enum-like columns), infer each column's business meaning (unit, metric definition, enum semantics).
+2. Register them with \`wren_describe("table", {"column": "meaning", ...})\` — registered meanings persist for this session and are injected automatically into every later round; never re-guess a cataloged column.
+3. For ambiguities that materially affect conclusions and cannot be inferred from the data itself (unknown units, ambiguous metric definitions, unexplained enum values): **do not guess** — list the questions explicitly in your reply to the user, and register or use the meanings only after confirmation.
 
 ---
 
@@ -424,26 +429,30 @@ const CUSTOM_MODEL_SYSTEM_PREFIX_ZH = `# 角色（Role）
 
 ---
 
-# WrenAI 语义层（治理数据访问）
+# WrenAI 语义层（上传数据 SQL 访问）
 
-本环境已接入 **WrenAI 语义层**。业务数据必须通过预定义的 \`wren_query(sql)\` 函数查询（每个 \`<Code>\` 块中自动可用，无需 import）。它返回 **pandas DataFrame**，并强制执行治理过的、口径一致的 SQL：
+本 session 上传的数据文件（CSV/Excel）会自动注册进 DuckDB 语义层。其表与列在用户消息的"# Semantic Layer (session data)"数据块中列出。用预定义的 \`wren_query(sql)\` 函数查询（每个 \`<Code>\` 块中自动可用，无需 import）。它返回 **pandas DataFrame**：
 
 \`\`\`python
-df = wren_query("SELECT customer_name, SUM(amount) AS revenue FROM customer_orders GROUP BY customer_name ORDER BY revenue DESC LIMIT 10")
+df = wren_query("SELECT 某列, SUM(数值列) AS 合计 FROM 表名 GROUP BY 某列")
 print(df.head())
 \`\`\`
 
-可用语义对象（SQL 必须使用以下名称，而非底层数据库表名）：
-
-- 模型：\`orders\`（id, customer_id, amount）、\`customers\`（id, name）
-- 视图：\`customer_orders\`（customer_name, order_id, amount）
-- Cube \`order_metrics\`：指标 \`total_revenue\`（amount 求和）、\`order_count\`（计数）
-
 规则：
 
-- 涉及业务指标时优先使用 \`wren_query\`；仅当数据不在语义层内时才读取工作区文件。
+- 严格使用 session 语义层上下文中列出的表名/列名，不要凭空编造表名。
+- 大规模聚合、多表 JOIN 优先用 \`wren_query\`（DuckDB 引擎，省内存）；需要复杂 Python 处理时用 pandas。两条路径数据一致。
+- \`wren_dry_run(sql)\` 可在不执行的前提下校验 SQL（合法返回 None）。
 - 探索性查询请传 \`limit=\`（如 \`limit=100\`）控制返回行数。
-- 查询失败时阅读报错信息，修正 SQL 后重试。
+- 若上下文中没有 session 语义层信息，直接用 pandas 读取工作区文件。
+
+# 数据编目（业务含义）
+
+列含义是分析正确性的关键。当语义层上下文显示有表尚未登记列含义时（上下文会提示）：
+
+1. 深入分析前，先对**与任务相关的表**编目：采样数据（\`wren_query("SELECT * FROM 表名 LIMIT 5")\`，枚举列可加 \`GROUP BY\`），推断每列的业务含义（单位、口径、枚举值语义）。
+2. 用 \`wren_describe("表名", {"列名": "含义", ...})\` 登记 —— 登记后在本 session 持久生效、后续每轮自动注入，已编目的列不要重复推断。
+3. 对影响分析结论且无法从数据本身推断的歧义（单位不明、口径有二义、枚举值语义不明）：**不要臆测** —— 在给用户的回复中明确列出问题请其确认，得到答复后再登记或使用。
 
 ---
 
@@ -462,6 +471,31 @@ type WorkspaceNode = {
   preview_url?: string;
   children?: WorkspaceNode[];
   is_generated?: boolean; // 标识是否为代码生成的文件或文件夹
+};
+
+// session 语义层模型（/semantic/layer 返回结构）
+type SemanticModel = {
+  name: string;
+  description: string;
+  source_file: string;
+  row_count: number;
+  columns: { name: string; type: string; desc?: string }[];
+};
+
+type SemanticRelationship = {
+  name: string;
+  condition: string;
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+};
+
+type MemoryPair = {
+  file: string;
+  nl: string;
+  sql: string;
+  datasource: string;
 };
 
 interface AnalysisSection {
@@ -988,7 +1022,60 @@ export function ThreePanelInterface() {
         setSystemPrompt(savedRequirements);
       }
 
-      const savedProvider = localStorage.getItem("deepanalyze.llmProvider");
+      const currentUser = getUsername();
+
+      // 一次性迁移：把旧的全局 key（无用户名前缀）迁移到当前用户的命名空间，
+      // 然后删除全局 key，避免下一个登录的用户继承到上一个用户的本地配置
+      try {
+        const migrationFlagKey = userScopedKey(
+          currentUser,
+          "deepanalyze.model.migrated.v1"
+        );
+        if (localStorage.getItem(migrationFlagKey) !== "1") {
+          const legacyLocalKeys = [
+            "deepanalyze.llmProvider",
+            "deepanalyze.customModelName",
+            "deepanalyze.modelName",
+            "deepanalyze.modelTemperature",
+            "deepanalyze.maxRounds",
+            "deepanalyze.maxDurationSec",
+            "deepanalyze.customApiBase",
+          ];
+          for (const legacyKey of legacyLocalKeys) {
+            const legacyValue = localStorage.getItem(legacyKey);
+            if (legacyValue === null) continue;
+            const scopedKey = userScopedKey(currentUser, legacyKey);
+            if (localStorage.getItem(scopedKey) === null) {
+              localStorage.setItem(scopedKey, legacyValue);
+            }
+            localStorage.removeItem(legacyKey);
+          }
+          const legacySessionKeys = [
+            "deepanalyze.heywhaleApiKey",
+            "deepanalyze.customApiKey",
+          ];
+          for (const legacyKey of legacySessionKeys) {
+            const legacyValue = sessionStorage.getItem(legacyKey);
+            if (legacyValue === null) continue;
+            const scopedKey = userScopedKey(currentUser, legacyKey);
+            if (sessionStorage.getItem(scopedKey) === null) {
+              sessionStorage.setItem(scopedKey, legacyValue);
+            }
+            sessionStorage.removeItem(legacyKey);
+          }
+          localStorage.setItem(migrationFlagKey, "1");
+        }
+      } catch {
+        // 迁移失败不影响正常使用，后续 useEffect 重写时也会写用户命名空间
+      }
+
+      const readUserLocal = (baseKey: string) => {
+        const scoped = localStorage.getItem(userScopedKey(currentUser, baseKey));
+        if (scoped !== null) return scoped;
+        return localStorage.getItem(baseKey);
+      };
+
+      const savedProvider = readUserLocal("deepanalyze.llmProvider");
       if (
         savedProvider === "local" ||
         savedProvider === "heywhale" ||
@@ -998,28 +1085,44 @@ export function ThreePanelInterface() {
       }
 
       const savedCustomModelName =
-        localStorage.getItem("deepanalyze.customModelName") ||
-        localStorage.getItem("deepanalyze.modelName");
+        readUserLocal("deepanalyze.customModelName") ||
+        readUserLocal("deepanalyze.modelName");
       if (savedCustomModelName) {
         setCustomModelName(savedCustomModelName);
       }
 
-      const savedTemperature = localStorage.getItem("deepanalyze.modelTemperature");
+      const savedTemperature = readUserLocal("deepanalyze.modelTemperature");
       if (savedTemperature) {
         setModelTemperature(savedTemperature);
       }
 
-      const savedApiKey = sessionStorage.getItem("deepanalyze.heywhaleApiKey");
+      const savedMaxRounds = readUserLocal("deepanalyze.maxRounds");
+      if (savedMaxRounds) {
+        setMaxRounds(savedMaxRounds);
+      }
+
+      const savedMaxDurationSec = readUserLocal(
+        "deepanalyze.maxDurationSec"
+      );
+      if (savedMaxDurationSec) {
+        setMaxDurationSec(savedMaxDurationSec);
+      }
+
+      const savedApiKey = sessionStorage.getItem(
+        userScopedKey(currentUser, "deepanalyze.heywhaleApiKey")
+      );
       if (savedApiKey) {
         setHeywhaleApiKey(savedApiKey);
       }
 
-      const savedCustomApiBase = localStorage.getItem("deepanalyze.customApiBase");
+      const savedCustomApiBase = readUserLocal("deepanalyze.customApiBase");
       if (savedCustomApiBase) {
         setCustomApiBase(savedCustomApiBase);
       }
 
-      const savedCustomApiKey = sessionStorage.getItem("deepanalyze.customApiKey");
+      const savedCustomApiKey = sessionStorage.getItem(
+        userScopedKey(currentUser, "deepanalyze.customApiKey")
+      );
       if (savedCustomApiKey) {
         setCustomApiKey(savedCustomApiKey);
       }
@@ -1269,6 +1372,38 @@ export function ThreePanelInterface() {
     () => new Set()
   );
   const fileSelectionInitializedRef = useRef(false);
+  // 语义层面板（WrenAI session 语义层浏览/编目/预览）
+  const [semanticModels, setSemanticModels] = useState<SemanticModel[]>([]);
+  const [semanticExcluded, setSemanticExcluded] = useState<string[]>([]);
+  const [semanticLoading, setSemanticLoading] = useState(false);
+  const [expandedSemanticTables, setExpandedSemanticTables] = useState<
+    Set<string>
+  >(() => new Set());
+  const [descEdit, setDescEdit] = useState<{
+    table: string;
+    column: string;
+    value: string;
+  } | null>(null);
+  const [semanticPreview, setSemanticPreview] = useState<{
+    table: string;
+    columns: string[];
+    rows: string[][];
+  } | null>(null);
+  const [semanticPreviewOpen, setSemanticPreviewOpen] = useState(false);
+  const [semanticPreviewLoading, setSemanticPreviewLoading] = useState(false);
+  // 语义层表间关系（后端同名列推断）+ 用户级查询记忆
+  const [semanticRelationships, setSemanticRelationships] = useState<
+    SemanticRelationship[]
+  >([]);
+  const [memoryPairs, setMemoryPairs] = useState<MemoryPair[]>([]);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  // 记忆编辑器：null=关闭；file 为空 = 新增
+  const [memoryEdit, setMemoryEdit] = useState<{
+    file: string;
+    nl: string;
+    sql: string;
+    datasource: string;
+  } | null>(null);
   const [uiLanguage, setUiLanguage] = useState<UILanguage>("en");
   const [interactionMode, setInteractionMode] =
     useState<InteractionMode>("auto");
@@ -1277,6 +1412,8 @@ export function ThreePanelInterface() {
   const [llmProvider, setLlmProvider] = useState<LlmProvider>("local");
   const [customModelName, setCustomModelName] = useState(DEFAULT_MODEL_NAME);
   const [modelTemperature, setModelTemperature] = useState("0.4");
+  const [maxRounds, setMaxRounds] = useState("30");
+  const [maxDurationSec, setMaxDurationSec] = useState("1800");
   const [heywhaleApiKey, setHeywhaleApiKey] = useState("");
   const [customApiBase, setCustomApiBase] = useState("");
   const [customApiKey, setCustomApiKey] = useState("");
@@ -1300,32 +1437,50 @@ export function ThreePanelInterface() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    localStorage.setItem("deepanalyze.llmProvider", llmProvider);
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.llmProvider"), llmProvider);
   }, [llmProvider]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    localStorage.setItem("deepanalyze.customModelName", customModelName);
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.customModelName"), customModelName);
   }, [customModelName]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    localStorage.setItem("deepanalyze.modelTemperature", modelTemperature);
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.modelTemperature"), modelTemperature);
   }, [modelTemperature]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    sessionStorage.setItem("deepanalyze.heywhaleApiKey", heywhaleApiKey);
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.maxRounds"), maxRounds);
+  }, [maxRounds]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.maxDurationSec"), maxDurationSec);
+  }, [maxDurationSec]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const user = getUsername();
+    sessionStorage.setItem(userScopedKey(user, "deepanalyze.heywhaleApiKey"), heywhaleApiKey);
   }, [heywhaleApiKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    localStorage.setItem("deepanalyze.customApiBase", customApiBase);
+    const user = getUsername();
+    localStorage.setItem(userScopedKey(user, "deepanalyze.customApiBase"), customApiBase);
   }, [customApiBase]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    sessionStorage.setItem("deepanalyze.customApiKey", customApiKey);
+    const user = getUsername();
+    sessionStorage.setItem(userScopedKey(user, "deepanalyze.customApiKey"), customApiKey);
   }, [customApiKey]);
 
   // 预览弹窗状态
@@ -1394,6 +1549,8 @@ export function ThreePanelInterface() {
   const workspaceFilesPendingRefreshRef = useRef(false);
   const lastWorkspaceFilesErrorRef = useRef("");
   const isTypingRef = useRef(false);
+  // 最近一次流式活动（发起请求/收到数据块）时间戳，供运行状态自愈校准用
+  const lastStreamActivityRef = useRef(0);
   const toastRef = useRef(toast);
   const collapsedSectionsRef = useRef<Record<string, boolean>>({});
   const lastActiveSectionUpdateAtRef = useRef(0);
@@ -1411,6 +1568,39 @@ export function ThreePanelInterface() {
   useEffect(() => {
     isTypingRef.current = isTyping;
   }, [isTyping]);
+
+  // 运行状态自愈：UI 显示"运行中"但后端实际空闲，且 30s 内没有任何流式活动时，
+  // 强制复位（覆盖流假死、热更新残留状态等一切 UI 与后端脱节场景）。
+  useEffect(() => {
+    if (!isTyping || !sessionId) return;
+    const SYNC_INTERVAL_MS = 15000;
+    const STALE_AFTER_MS = 30000;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const response = await fetch(
+            `${API_URLS.CHAT_RUNNING}?session_id=${encodeURIComponent(sessionId)}`
+          );
+          if (!response.ok) return;
+          const data = (await response.json()) as { running?: boolean };
+          const staleFor = Date.now() - lastStreamActivityRef.current;
+          if (data?.running === false && staleFor > STALE_AFTER_MS) {
+            console.warn(
+              "stale typing state detected (backend idle) — force reset"
+            );
+            streamAbortControllerRef.current?.abort();
+            streamAbortControllerRef.current = null;
+            updateTypingState(false);
+            setStreamingMessageId(null);
+            setIsStopping(false);
+          }
+        } catch {
+          /* 网络抖动时跳过本轮校准 */
+        }
+      })();
+    }, SYNC_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [isTyping, sessionId, updateTypingState, uiLanguage]);
 
   useEffect(() => {
     toastRef.current = toast;
@@ -1918,6 +2108,241 @@ export function ThreePanelInterface() {
     }
   };
 
+  // ---------- 语义层面板：加载 / 编目保存 / 数据预览 ----------
+
+  const loadSemanticLayer = useCallback(async () => {
+    if (!sessionId) return;
+    setSemanticLoading(true);
+    try {
+      const res = await fetch(
+        `${API_URLS.SEMANTIC_LAYER}?session_id=${encodeURIComponent(sessionId)}`,
+        { cache: "no-store" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setSemanticModels(Array.isArray(data.models) ? data.models : []);
+        setSemanticExcluded(Array.isArray(data.excluded) ? data.excluded : []);
+        setSemanticRelationships(
+          Array.isArray(data.relationships) ? data.relationships : []
+        );
+      }
+    } catch {
+      // 静默失败：面板显示空态即可
+    } finally {
+      setSemanticLoading(false);
+    }
+  }, [sessionId]);
+
+  // 用户级查询记忆（跨会话复用的 NL→SQL 对，可浏览/删除）
+  const loadMemoryPairs = useCallback(async () => {
+    if (!sessionId) return;
+    setMemoryLoading(true);
+    try {
+      const res = await fetch(
+        `${API_URLS.SEMANTIC_MEMORY}?session_id=${encodeURIComponent(sessionId)}`,
+        { cache: "no-store" }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setMemoryPairs(Array.isArray(data.pairs) ? data.pairs : []);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setMemoryLoading(false);
+    }
+  }, [sessionId]);
+
+  const forgetMemoryPair = useCallback(
+    async (file: string) => {
+      if (!sessionId) return;
+      try {
+        const res = await fetch(
+          `${API_URLS.SEMANTIC_MEMORY}?file=${encodeURIComponent(
+            file
+          )}&session_id=${encodeURIComponent(sessionId)}`,
+          { method: "DELETE" }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.pairs)) setMemoryPairs(data.pairs);
+          toast({
+            description: uiLanguage === "zh" ? "已删除该条记忆" : "Memory removed",
+          });
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [sessionId, toast, uiLanguage]
+  );
+
+  // 保存记忆（新增或编辑：file 为空 = 新增）
+  const saveMemoryPair = useCallback(async () => {
+    if (!sessionId || !memoryEdit) return;
+    if (!memoryEdit.nl.trim() || !memoryEdit.sql.trim()) {
+      toast({
+        description:
+          uiLanguage === "zh" ? "问题和 SQL 不能为空" : "Question and SQL are required",
+        variant: "destructive",
+      });
+      return;
+    }
+    try {
+      const isAdd = !memoryEdit.file;
+      const res = await fetch(API_URLS.SEMANTIC_MEMORY, {
+        method: isAdd ? "POST" : "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          ...(isAdd ? {} : { file: memoryEdit.file }),
+          nl: memoryEdit.nl,
+          sql: memoryEdit.sql,
+          datasource: memoryEdit.datasource,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.pairs)) setMemoryPairs(data.pairs);
+        setMemoryEdit(null);
+        toast({
+          description: isAdd
+            ? uiLanguage === "zh" ? "已添加记忆" : "Memory added"
+            : uiLanguage === "zh" ? "已保存修改" : "Memory updated",
+        });
+      } else {
+        const payload = await res.json().catch(() => ({}));
+        toast({
+          description: payload?.detail || `HTTP ${res.status}`,
+          variant: "destructive",
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }, [sessionId, memoryEdit, toast, uiLanguage]);
+
+  useEffect(() => {
+    setSemanticModels([]);
+    setSemanticExcluded([]);
+    setSemanticRelationships([]);
+    setExpandedSemanticTables(new Set());
+    if (sessionId) {
+      void loadSemanticLayer();
+      void loadMemoryPairs();
+    }
+  }, [sessionId, loadSemanticLayer, loadMemoryPairs]);
+
+  const removeSemanticTable = useCallback(
+    async (table: string) => {
+      if (!sessionId) return;
+      try {
+        const res = await fetch(
+          `${API_URLS.SEMANTIC_DELETE_TABLE}?table=${encodeURIComponent(
+            table
+          )}&session_id=${encodeURIComponent(sessionId)}`,
+          { method: "DELETE" }
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.models)) setSemanticModels(data.models);
+          if (Array.isArray(data.excluded)) setSemanticExcluded(data.excluded);
+          setExpandedSemanticTables((prev) => {
+            const next = new Set(prev);
+            next.delete(table);
+            return next;
+          });
+          toast({
+            description:
+              uiLanguage === "zh" ? "已从语义层删除（可恢复）" : "Removed (restorable)",
+          });
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [sessionId, toast, uiLanguage]
+  );
+
+  const restoreSemanticTable = useCallback(
+    async (table: string) => {
+      if (!sessionId) return;
+      try {
+        const res = await fetch(API_URLS.SEMANTIC_RESTORE, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, table }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.models)) setSemanticModels(data.models);
+          if (Array.isArray(data.excluded)) setSemanticExcluded(data.excluded);
+          toast({ description: uiLanguage === "zh" ? "已恢复" : "Restored" });
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [sessionId, toast, uiLanguage]
+  );
+
+  const saveColumnDesc = useCallback(
+    async (table: string, column: string, value: string) => {
+      if (!sessionId || !value.trim()) return;
+      try {
+        const res = await fetch(API_URLS.SEMANTIC_DESCRIBE, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            session_id: sessionId,
+            table,
+            descriptions: { [column]: value.trim() },
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.models)) setSemanticModels(data.models);
+          setDescEdit(null);
+          toast({ description: uiLanguage === "zh" ? "含义已登记" : "Meaning registered" });
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [sessionId, toast, uiLanguage]
+  );
+
+  const openSemanticPreview = useCallback(
+    async (table: string) => {
+      if (!sessionId) return;
+      setSemanticPreviewLoading(true);
+      setSemanticPreviewOpen(true);
+      setSemanticPreview({ table, columns: [], rows: [] });
+      try {
+        const url = new URL(
+          `${API_URLS.SEMANTIC_PREVIEW}?session_id=${encodeURIComponent(sessionId)}`,
+          window.location.origin
+        );
+        url.searchParams.set("table", table);
+        url.searchParams.set("limit", "50");
+        const res = await fetch(url.toString(), { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          setSemanticPreview({
+            table,
+            columns: data.columns || [],
+            rows: data.rows || [],
+          });
+        }
+      } catch {
+        // ignore
+      } finally {
+        setSemanticPreviewLoading(false);
+      }
+    },
+    [sessionId]
+  );
+
   const loadWorkspaceFiles = useCallback(async () => {
     if (!sessionId) return;
     if (workspaceFilesLoadingRef.current) {
@@ -2095,6 +2520,16 @@ export function ThreePanelInterface() {
         uiLanguage === "zh"
           ? "范围 0.0 - 2.0，默认 0.4"
           : "Range 0.0 - 2.0, default 0.4",
+      maxRounds: uiLanguage === "zh" ? "轮次上限" : "Max Rounds",
+      maxRoundsHint:
+        uiLanguage === "zh"
+          ? "范围 1 - 200，默认 30"
+          : "Range 1 - 200, default 30",
+      maxDuration: uiLanguage === "zh" ? "时长上限（秒）" : "Max Duration (sec)",
+      maxDurationHint:
+        uiLanguage === "zh"
+          ? "范围 60 - 21600，默认 1800"
+          : "Range 60 - 21600, default 1800",
       heywhaleApiKey: uiLanguage === "zh" ? "和鲸 API Key" : "HeyWhale API Key",
       heywhaleApiKeyPlaceholder:
         uiLanguage === "zh"
@@ -2272,6 +2707,19 @@ export function ThreePanelInterface() {
     if (!Number.isFinite(parsed)) return 0.4;
     return Math.min(2, Math.max(0, parsed));
   }, [modelTemperature]);
+
+  // Agent 预算：非法输入回退默认值（轮次 30 / 时长 1800s），并夹紧到后端允许范围
+  const normalizedMaxRounds = useMemo(() => {
+    const parsed = Number.parseInt(maxRounds, 10);
+    if (!Number.isFinite(parsed)) return 30;
+    return Math.min(200, Math.max(1, parsed));
+  }, [maxRounds]);
+
+  const normalizedMaxDurationSec = useMemo(() => {
+    const parsed = Number.parseInt(maxDurationSec, 10);
+    if (!Number.isFinite(parsed)) return 1800;
+    return Math.min(21600, Math.max(60, parsed));
+  }, [maxDurationSec]);
 
   const baseSystemPrompt = useMemo(() => {
     let mergedPrompt = "";
@@ -3377,7 +3825,7 @@ export function ThreePanelInterface() {
       setPreviewPayload(null);
 
       const ext = (file.extension || "").replace(/^\./, "").toLowerCase();
-      if (["png", "jpg", "jpeg", "gif", "svg", "webp"].includes(ext)) {
+      if (["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp"].includes(ext)) {
         setPreviewType("image");
         const correctedUrl = resolveWorkspaceFileUrl(
           file.preview_url || file.download_url,
@@ -3410,6 +3858,8 @@ export function ThreePanelInterface() {
 
       try {
         const previewPath = file.path || file.name;
+        // no-store：预览结果随文件覆盖/格式支持变化而变，绝不能用 HTTP 缓存
+        // （曾因缓存旧 415 响应导致已支持格式仍显示"暂不支持"）
         const res = await fetch(
           buildApiUrlWithParams(API_CONFIG.ENDPOINTS.WORKSPACE_PREVIEW, {
             path: previewPath,
@@ -3418,7 +3868,8 @@ export function ThreePanelInterface() {
             page_size: PREVIEW_TABLE_PAGE_SIZE,
             table_name: nextTableName,
             sheet_name: nextSheetName,
-          })
+          }),
+          { cache: "no-store" }
         );
         if (!res.ok) throw new Error("failed to fetch preview");
         const payload = (await res.json()) as PreviewPayload;
@@ -3429,11 +3880,17 @@ export function ThreePanelInterface() {
       } catch (e) {
         if (previewRequestIdRef.current !== requestId) return;
         setPreviewType("binary");
-        setPreviewContent(file.download_url);
+        // 兜底页的下载链接必须经过 URL 规整（相对路径 /api 前缀 + 参数编码）
+        const fallbackUrl = resolveWorkspaceFileUrl(
+          file.download_url || file.preview_url || "",
+          { download: true }
+        );
+        setPreviewContent(fallbackUrl);
+        setPreviewDownloadUrl(fallbackUrl);
         setPreviewPayload({
           kind: "binary",
           title: file.name,
-          content: file.download_url,
+          content: fallbackUrl,
         });
       } finally {
         if (previewRequestIdRef.current === requestId) {
@@ -3441,7 +3898,7 @@ export function ThreePanelInterface() {
         }
       }
     },
-    [sessionId]
+    [sessionId, resolveWorkspaceFileUrl]
   );
 
   const openFullPreview = useCallback(
@@ -3525,7 +3982,12 @@ export function ThreePanelInterface() {
       setInputValue(selection.question.prompt[uiLanguage]);
       setSelectedWorkspacePath(files[0].path);
       await Promise.all([loadWorkspaceFiles(), loadWorkspaceTree()]);
-      await openPreview(files[0]);
+      // 至此数据已加载成功——后续预览失败不应误报"加载失败"
+      try {
+        await openPreview(files[0]);
+      } catch (previewError) {
+        console.warn("sample preview failed (non-fatal)", previewError);
+      }
       setIsSampleDialogOpen(false);
       toast({
         description:
@@ -5860,9 +6322,11 @@ export function ThreePanelInterface() {
     const aiMsgId = `${Date.now()}-${Math.random()}`;
 
     try {
-      const response = await fetch(API_URLS.CHAT_COMPLETIONS, {
+      // 直连后端（绕过 Next dev 代理的响应体缓冲），credentials 携带同站 Cookie
+      const response = await fetch(API_URLS.CHAT_COMPLETIONS_DIRECT, {
         method: "POST",
         signal: abortController.signal,
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
         },
@@ -5880,6 +6344,8 @@ export function ThreePanelInterface() {
                 : "",
           api_base: llmProvider === "custom" ? customApiBase.trim() : "",
           temperature: normalizedTemperature,
+          max_rounds: normalizedMaxRounds,
+          max_duration_sec: normalizedMaxDurationSec,
           ui_language: uiLanguage,
           system_prompt: systemPrompt.trim(),
           workspace: Array.from(selectedAnalysisFiles),
@@ -6003,18 +6469,30 @@ export function ThreePanelInterface() {
         }
       };
 
-      const yieldToNextPaint = () =>
-        new Promise<void>((resolve) => {
-          window.requestAnimationFrame(() => resolve());
-        });
-
       let buffer = "";
       let nextInteractionStatus: "idle" | "awaiting_user" = "idle";
+
+      // 注意：不要用“空闲超时”掐断流——思考型模型（如 MiniMax-M3）可能数分钟
+      // 只发 SSE 保活、不产生内容，静默不等于流死。真正的死亡检测由
+      // “后端运行状态自愈同步”（isTyping effect 里的 /chat/running 校准）负责：
+      // 后端空闲 + 30s 无活动才复位，后端忙则说明分析仍在正常推进。
+
+      // 后台标签页 requestAnimationFrame 不触发，不能 await 它（会永久卡死读取
+      // 循环）；按时间节流刷新 UI 即可，最后一帧在循环结束后无条件 flush。
+      let lastFlushAt = 0;
+      const throttledFlush = () => {
+        const now = Date.now();
+        if (now - lastFlushAt >= 80) {
+          lastFlushAt = now;
+          flushAiMessage(accumulatedMessage);
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
+        lastStreamActivityRef.current = Date.now();
         buffer += decoder.decode(value, { stream: true });
 
         const lines = buffer.split("\n");
@@ -6038,8 +6516,7 @@ export function ThreePanelInterface() {
 
             if (deltaContent) {
               accumulatedMessage += deltaContent;
-              flushAiMessage(accumulatedMessage);
-              await yieldToNextPaint();
+              throttledFlush();
             }
           } catch (e) {
             console.warn("JSON parse error for line:", trimmed, e);
@@ -6060,8 +6537,6 @@ export function ThreePanelInterface() {
           }
           if (deltaContent) {
             accumulatedMessage += deltaContent;
-            flushAiMessage(accumulatedMessage);
-            await yieldToNextPaint();
           }
         } catch (e) { }
       }
@@ -6074,6 +6549,7 @@ export function ThreePanelInterface() {
       // 结束后刷新一次文件列表确保无遗漏
       await loadWorkspaceFiles();
       await loadWorkspaceTree();
+      void loadSemanticLayer(); // AI 编目可能已写回字典，同步刷新面板
       updateTypingState(false); // 结束加载状态
       setStreamingMessageId(null);
       streamAbortControllerRef.current = null;
@@ -6703,6 +7179,48 @@ export function ThreePanelInterface() {
                         readOnly={llmProvider !== "custom"}
                         disabled={llmProvider !== "custom"}
                       />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <div className="mb-1.5 flex items-center justify-between">
+                          <div className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                            {textLabels.maxRounds}
+                          </div>
+                          <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                            {normalizedMaxRounds}
+                          </div>
+                        </div>
+                        <Input
+                          value={maxRounds}
+                          onChange={(e) => setMaxRounds(e.target.value)}
+                          inputMode="numeric"
+                          className="rounded-xl border-gray-200 dark:border-gray-800"
+                          placeholder="30"
+                        />
+                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          {textLabels.maxRoundsHint}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="mb-1.5 flex items-center justify-between">
+                          <div className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                            {textLabels.maxDuration}
+                          </div>
+                          <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                            {normalizedMaxDurationSec}
+                          </div>
+                        </div>
+                        <Input
+                          value={maxDurationSec}
+                          onChange={(e) => setMaxDurationSec(e.target.value)}
+                          inputMode="numeric"
+                          className="rounded-xl border-gray-200 dark:border-gray-800"
+                          placeholder="1800"
+                        />
+                        <div className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                          {textLabels.maxDurationHint}
+                        </div>
+                      </div>
                     </div>
                     {llmProvider === "heywhale" && (
                       <div>
@@ -7388,6 +7906,504 @@ export function ThreePanelInterface() {
                     )}
                   </div>
                 </Card>
+
+                {/* 语义层（WrenAI session 数据目录）：表/列/含义 + 数据预览 */}
+                <Card className="rounded-2xl border-gray-200/80 dark:border-gray-800/80 overflow-hidden">
+                  <div className="border-b border-gray-200/80 dark:border-gray-800/80 px-4 py-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Database className="h-4 w-4 text-gray-400" />
+                          <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                            {uiLanguage === "zh" ? "语义层" : "Semantic Layer"}
+                          </div>
+                          {semanticModels.length > 0 && (
+                            <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[11px] shrink-0">
+                              {(() => {
+                                const cataloged = semanticModels.filter((m) =>
+                                  m.columns.some((c) => c.desc)
+                                ).length;
+                                return uiLanguage === "zh"
+                                  ? `已编目 ${cataloged}/${semanticModels.length}`
+                                  : `${cataloged}/${semanticModels.length} cataloged`;
+                              })()}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          {uiLanguage === "zh"
+                            ? "上传数据自动登记的表与列含义（AI 编目后此处同步）"
+                            : "Tables and column meanings auto-registered from uploads"}
+                        </div>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void loadSemanticLayer()}
+                        disabled={semanticLoading || !sessionId}
+                        className="h-8 w-8 p-0 shrink-0"
+                        title={uiLanguage === "zh" ? "刷新语义层" : "Refresh semantic layer"}
+                      >
+                        <RefreshCw
+                          className={`h-4 w-4 ${semanticLoading ? "animate-spin" : ""}`}
+                        />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="p-3 space-y-2">
+                    {semanticModels.length === 0 ? (
+                      <div className="text-sm text-gray-500 dark:text-gray-400 px-1 py-2">
+                        {semanticLoading
+                          ? uiLanguage === "zh"
+                            ? "加载中..."
+                            : "Loading..."
+                          : uiLanguage === "zh"
+                            ? "上传表格文件后，这里会显示自动登记的数据模型。"
+                            : "Upload tabular files to see auto-registered data models here."}
+                      </div>
+                    ) : (
+                      semanticModels.map((model) => {
+                        const expanded = expandedSemanticTables.has(model.name);
+                        const catalogedCount = model.columns.filter((c) => c.desc).length;
+                        return (
+                          <div
+                            key={model.name}
+                            className="rounded-xl border border-gray-200 dark:border-gray-800 overflow-hidden"
+                          >
+                            <button
+                              type="button"
+                              className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-900/50 transition-colors"
+                              onClick={() => {
+                                setExpandedSemanticTables((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(model.name)) next.delete(model.name);
+                                  else next.add(model.name);
+                                  return next;
+                                });
+                              }}
+                            >
+                              {expanded ? (
+                                <ChevronDown className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                              ) : (
+                                <ChevronRight className="h-3.5 w-3.5 text-gray-400 shrink-0" />
+                              )}
+                              <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+                                {model.name}
+                              </span>
+                              <span className="text-[11px] text-gray-400 shrink-0">
+                                {model.row_count} {uiLanguage === "zh" ? "行" : "rows"}
+                                {catalogedCount > 0 && ` · ${catalogedCount}/${model.columns.length}`}
+                              </span>
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                className="ml-auto inline-flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 px-2 py-0.5 text-[11px] text-gray-500 hover:text-gray-900 dark:hover:text-gray-200 shrink-0"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void openSemanticPreview(model.name);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.stopPropagation();
+                                    void openSemanticPreview(model.name);
+                                  }
+                                }}
+                              >
+                                <Eye className="h-3 w-3" />
+                                {uiLanguage === "zh" ? "预览" : "Preview"}
+                              </span>
+                              <span
+                                role="button"
+                                tabIndex={0}
+                                className="inline-flex items-center justify-center h-6 w-6 rounded-full shrink-0 text-gray-300 hover:text-red-500"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void removeSemanticTable(model.name);
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.stopPropagation();
+                                    void removeSemanticTable(model.name);
+                                  }
+                                }}
+                                title={
+                                  uiLanguage === "zh"
+                                    ? "从语义层删除（不影响上传文件，可恢复）"
+                                    : "Remove from semantic layer (file kept, restorable)"
+                                }
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </span>
+                            </button>
+                            {expanded && (
+                              <div className="border-t border-gray-100 dark:border-gray-800/60 px-3 py-2 space-y-1.5 bg-gray-50/50 dark:bg-gray-900/30">
+                                <div className="text-[11px] text-gray-400 truncate">
+                                  {model.description}
+                                </div>
+                                {model.columns.map((column) => {
+                                  const editing =
+                                    descEdit?.table === model.name &&
+                                    descEdit?.column === column.name;
+                                  return (
+                                    <div
+                                      key={column.name}
+                                      className="rounded-lg bg-white dark:bg-gray-900/70 border border-gray-100 dark:border-gray-800 px-2.5 py-1.5"
+                                    >
+                                      <div className="flex items-center gap-2 min-w-0">
+                                        <span className="text-xs font-medium text-gray-900 dark:text-gray-100 truncate">
+                                          {column.name}
+                                        </span>
+                                        <span className="text-[10px] text-gray-400 shrink-0 font-mono">
+                                          {column.type}
+                                        </span>
+                                        {!editing && (
+                                          <button
+                                            type="button"
+                                            className="ml-auto h-5 w-5 p-0 shrink-0 text-gray-300 hover:text-gray-600 dark:hover:text-gray-300"
+                                            onClick={() =>
+                                              setDescEdit({
+                                                table: model.name,
+                                                column: column.name,
+                                                value: column.desc || "",
+                                              })
+                                            }
+                                            title={uiLanguage === "zh" ? "编辑含义" : "Edit meaning"}
+                                          >
+                                            <Edit className="h-3 w-3" />
+                                          </button>
+                                        )}
+                                      </div>
+                                      {editing ? (
+                                        <div className="mt-1.5 flex items-center gap-1.5">
+                                          <Input
+                                            autoFocus
+                                            value={descEdit.value}
+                                            onChange={(e) =>
+                                              setDescEdit((prev) =>
+                                                prev ? { ...prev, value: e.target.value } : prev
+                                              )
+                                            }
+                                            onKeyDown={(e) => {
+                                              if (e.key === "Enter") {
+                                                void saveColumnDesc(
+                                                  model.name,
+                                                  column.name,
+                                                  descEdit.value
+                                                );
+                                              } else if (e.key === "Escape") {
+                                                setDescEdit(null);
+                                              }
+                                            }}
+                                            placeholder={
+                                              uiLanguage === "zh"
+                                                ? "这列是什么意思？回车保存"
+                                                : "What does this column mean? Enter to save"
+                                            }
+                                            className="h-7 text-xs rounded-lg"
+                                          />
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 w-7 p-0 shrink-0"
+                                            onClick={() =>
+                                              void saveColumnDesc(
+                                                model.name,
+                                                column.name,
+                                                descEdit.value
+                                              )
+                                            }
+                                          >
+                                            <Check className="h-3.5 w-3.5" />
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-7 w-7 p-0 shrink-0"
+                                            onClick={() => setDescEdit(null)}
+                                          >
+                                            <X className="h-3.5 w-3.5" />
+                                          </Button>
+                                        </div>
+                                      ) : (
+                                        <div
+                                          className={
+                                            column.desc
+                                              ? "mt-0.5 text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed"
+                                              : "mt-0.5 text-[11px] text-gray-300 dark:text-gray-600 italic"
+                                          }
+                                        >
+                                          {column.desc ||
+                                            (uiLanguage === "zh"
+                                              ? "未登记含义（可编辑，或由 AI 编目自动填写）"
+                                              : "No meaning yet (editable, or auto-filled by AI cataloging)")}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                    {semanticRelationships.length > 0 && (
+                      <div className="rounded-xl border border-dashed border-gray-200 dark:border-gray-800 px-3 py-2 space-y-1.5">
+                        <div className="text-[11px] text-gray-400">
+                          {uiLanguage === "zh"
+                            ? `自动推断的表间关联（${semanticRelationships.length} 条，同名键列）`
+                            : `Inferred table joins (${semanticRelationships.length}, same-name keys)`}
+                        </div>
+                        <div className="space-y-1">
+                          {semanticRelationships.map((rel) => (
+                            <div
+                              key={rel.name}
+                              className="font-mono text-[11px] text-gray-500 dark:text-gray-400 truncate"
+                              title={rel.condition}
+                            >
+                              {rel.condition}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {semanticExcluded.length > 0 && (
+                      <div className="rounded-xl border border-dashed border-gray-200 dark:border-gray-800 px-3 py-2 space-y-1.5">
+                        <div className="text-[11px] text-gray-400">
+                          {uiLanguage === "zh"
+                            ? `已从语义层删除 ${semanticExcluded.length} 张表（上传文件不受影响）`
+                            : `${semanticExcluded.length} table(s) removed (files kept)`}
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {semanticExcluded.map((name) => (
+                            <span
+                              key={name}
+                              role="button"
+                              tabIndex={0}
+                              className="inline-flex items-center gap-1 rounded-full border border-gray-200 dark:border-gray-700 px-2 py-0.5 text-[11px] text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 line-through cursor-pointer"
+                              onClick={() => void restoreSemanticTable(name)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  void restoreSemanticTable(name);
+                                }
+                              }}
+                              title={uiLanguage === "zh" ? "点击恢复" : "Click to restore"}
+                            >
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </Card>
+
+                {/* 查询记忆（用户级 NL→SQL 库）：分析中登记的可复用查询 */}
+                <Card className="rounded-2xl border-gray-200/80 dark:border-gray-800/80 overflow-hidden">
+                  <div className="border-b border-gray-200/80 dark:border-gray-800/80 px-4 py-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <BookMarked className="h-4 w-4 text-gray-400" />
+                          <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                            {uiLanguage === "zh" ? "查询记忆" : "Query Memory"}
+                          </div>
+                          {memoryPairs.length > 0 && (
+                            <Badge variant="secondary" className="rounded-full px-2 py-0.5 text-[11px] shrink-0">
+                              {memoryPairs.length}
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                          {uiLanguage === "zh"
+                            ? "分析中登记的可复用查询，跨会话自动召回参考"
+                            : "Reusable queries registered during analyses, recalled across sessions"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            setMemoryEdit({ file: "", nl: "", sql: "", datasource: "" })
+                          }
+                          disabled={!sessionId}
+                          className="h-8 w-8 p-0"
+                          title={uiLanguage === "zh" ? "添加记忆" : "Add memory"}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => void loadMemoryPairs()}
+                          disabled={memoryLoading || !sessionId}
+                          className="h-8 w-8 p-0"
+                          title={uiLanguage === "zh" ? "刷新记忆" : "Refresh memory"}
+                        >
+                          <RefreshCw
+                            className={`h-4 w-4 ${memoryLoading ? "animate-spin" : ""}`}
+                          />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="p-3 space-y-2">
+                    {memoryPairs.length === 0 ? (
+                      <div className="text-sm text-gray-500 dark:text-gray-400 px-1 py-2">
+                        {memoryLoading
+                          ? uiLanguage === "zh"
+                            ? "加载中..."
+                            : "Loading..."
+                          : uiLanguage === "zh"
+                            ? "暂无记忆。分析中模型登记的查询会出现在这里。"
+                            : "No memories yet. Queries registered by the model will appear here."}
+                      </div>
+                    ) : (
+                      memoryPairs.map((pair) => (
+                        <div
+                          key={pair.file}
+                          className="rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2 group"
+                        >
+                          <div className="flex items-start gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className="text-sm text-gray-900 dark:text-gray-100 truncate"
+                                title={pair.nl}
+                              >
+                                {pair.nl}
+                              </div>
+                              {pair.datasource && (
+                                <span className="mt-0.5 inline-block rounded-full bg-gray-100 dark:bg-gray-900 px-2 py-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+                                  {pair.datasource}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center shrink-0">
+                              <button
+                                type="button"
+                                className="rounded-md p-1 text-gray-300 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+                                onClick={() =>
+                                  setMemoryEdit({
+                                    file: pair.file,
+                                    nl: pair.nl,
+                                    sql: pair.sql,
+                                    datasource: pair.datasource,
+                                  })
+                                }
+                                title={uiLanguage === "zh" ? "编辑" : "Edit"}
+                              >
+                                <Edit className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-md p-1 text-gray-300 hover:text-red-500 transition-colors"
+                                onClick={() => void forgetMemoryPair(pair.file)}
+                                title={uiLanguage === "zh" ? "删除" : "Delete"}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                          <div
+                            className="mt-1.5 font-mono text-[11px] text-gray-500 dark:text-gray-400 whitespace-pre-wrap break-all line-clamp-3"
+                            title={pair.sql}
+                          >
+                            {pair.sql}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </Card>
+
+                {/* 记忆编辑弹窗：新增 / 修改 NL、SQL、数据源 */}
+                <Dialog
+                  open={memoryEdit !== null}
+                  onOpenChange={(open) => {
+                    if (!open) setMemoryEdit(null);
+                  }}
+                >
+                  <DialogContent
+                    aria-describedby={undefined}
+                    className="sm:max-w-lg"
+                  >
+                    <DialogHeader>
+                      <DialogTitle>
+                        {memoryEdit && !memoryEdit.file
+                          ? uiLanguage === "zh"
+                            ? "添加查询记忆"
+                            : "Add Query Memory"
+                          : uiLanguage === "zh"
+                            ? "编辑查询记忆"
+                            : "Edit Query Memory"}
+                      </DialogTitle>
+                    </DialogHeader>
+                    {memoryEdit && (
+                      <div className="space-y-3">
+                        <div>
+                          <div className="mb-1 text-xs font-medium text-gray-700 dark:text-gray-300">
+                            {uiLanguage === "zh" ? "问题（自然语言）" : "Question (NL)"}
+                          </div>
+                          <Input
+                            value={memoryEdit.nl}
+                            onChange={(e) =>
+                              setMemoryEdit((prev) =>
+                                prev ? { ...prev, nl: e.target.value } : prev
+                              )
+                            }
+                            placeholder={
+                              uiLanguage === "zh"
+                                ? "例如：各区域销售总额对比"
+                                : "e.g. total sales by region"
+                            }
+                          />
+                        </div>
+                        <div>
+                          <div className="mb-1 text-xs font-medium text-gray-700 dark:text-gray-300">
+                            SQL
+                          </div>
+                          <Textarea
+                            value={memoryEdit.sql}
+                            onChange={(e) =>
+                              setMemoryEdit((prev) =>
+                                prev ? { ...prev, sql: e.target.value } : prev
+                              )
+                            }
+                            className="font-mono text-xs min-h-28"
+                            placeholder="SELECT ..."
+                          />
+                        </div>
+                        <div>
+                          <div className="mb-1 text-xs font-medium text-gray-700 dark:text-gray-300">
+                            {uiLanguage === "zh" ? "数据源（数据文件名，可选）" : "Datasource (file name, optional)"}
+                          </div>
+                          <Input
+                            value={memoryEdit.datasource}
+                            onChange={(e) =>
+                              setMemoryEdit((prev) =>
+                                prev ? { ...prev, datasource: e.target.value } : prev
+                              )
+                            }
+                            placeholder={uiLanguage === "zh" ? "例如：销售流水.csv" : "e.g. sales.csv"}
+                          />
+                        </div>
+                        <div className="flex justify-end gap-2 pt-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setMemoryEdit(null)}
+                          >
+                            {uiLanguage === "zh" ? "取消" : "Cancel"}
+                          </Button>
+                          <Button size="sm" onClick={() => void saveMemoryPair()}>
+                            {uiLanguage === "zh" ? "保存" : "Save"}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </DialogContent>
+                </Dialog>
 
                 <Card className="rounded-2xl border-gray-200/80 dark:border-gray-800/80 overflow-hidden">
                   <div className="border-b border-gray-200/80 dark:border-gray-800/80 px-4 py-2">
@@ -8343,6 +9359,72 @@ export function ThreePanelInterface() {
               <Download className="h-4 w-4" />
               下载
             </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 语义层数据预览弹窗：表采样数据 */}
+      <Dialog open={semanticPreviewOpen} onOpenChange={setSemanticPreviewOpen}>
+        <DialogContent
+          aria-describedby={undefined}
+          style={{
+            width: "86vw",
+            height: "80vh",
+            maxWidth: "86vw",
+            maxHeight: "80vh",
+          }}
+          className="p-0 overflow-hidden flex flex-col"
+        >
+          <DialogHeader className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
+            <DialogTitle className="text-sm font-medium truncate flex items-center gap-2">
+              <Database className="h-4 w-4 text-gray-400" />
+              {semanticPreview?.table}
+              <span className="text-xs text-gray-400 font-normal">
+                {uiLanguage === "zh" ? "（前 50 行采样）" : "(first 50 rows)"}
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-auto">
+            {semanticPreviewLoading ? (
+              <div className="flex items-center justify-center h-full text-sm text-gray-500">
+                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                {uiLanguage === "zh" ? "查询中..." : "Querying..."}
+              </div>
+            ) : semanticPreview && semanticPreview.columns.length > 0 ? (
+              <Table>
+                <TableHeader className="sticky top-0 bg-white dark:bg-gray-950 z-10">
+                  <TableRow>
+                    {semanticPreview.columns.map((col) => (
+                      <TableHead
+                        key={col}
+                        className="whitespace-nowrap text-xs font-medium"
+                      >
+                        {col}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {semanticPreview.rows.map((row, rowIndex) => (
+                    <TableRow key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <TableCell
+                          key={cellIndex}
+                          className="whitespace-nowrap text-xs max-w-[280px] truncate"
+                          title={cell ?? ""}
+                        >
+                          {cell ?? "—"}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            ) : (
+              <div className="flex items-center justify-center h-full text-sm text-gray-500">
+                {uiLanguage === "zh" ? "无数据" : "No data"}
+              </div>
+            )}
           </div>
         </DialogContent>
       </Dialog>

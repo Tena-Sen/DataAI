@@ -31,6 +31,24 @@ def session_prefix(username: str) -> str:
     return f"u{username}__"
 
 
+def resolve_user_from_session(session_id: str) -> str | None:
+    """解析 session 归属用户（u{用户名}__ 前缀）。
+
+    优先取当前登录上下文；线程/后台无上下文时回退到已注册用户名的
+    最长前缀匹配（正确处理用户名本身含 '_' 的情况，如 a_b 与 a）。
+    """
+    session_id = str(session_id or "")
+    current = get_current_user()
+    if current and session_id.startswith(session_prefix(current)):
+        return current
+    best: str | None = None
+    for username in store.list_usernames():
+        if session_id.startswith(session_prefix(username)):
+            if best is None or len(username) > len(best):
+                best = username
+    return best
+
+
 class AuthStore:
     """用户与令牌存储（JSON 文件，原子写，线程安全）。"""
 
@@ -153,6 +171,10 @@ class AuthStore:
     def user_exists(self, username: str) -> bool:
         with self._lock:
             return username in self._load_users()
+
+    def list_usernames(self) -> list[str]:
+        with self._lock:
+            return list(self._load_users())
 
     def list_sessions(self, username: str) -> list[dict]:
         """列出该用户名下的所有会话（按更新时间倒序）。"""

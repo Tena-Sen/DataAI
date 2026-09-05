@@ -22,6 +22,31 @@ DataAI 将 DeepAnalyze 的自主数据科学能力与 WrenAI 的语义层和文�
 
 ---
 
+<p align="center">
+  <img src="DeepAnalyze/assets/deepanalyze.jpg" alt="DeepAnalyze 工作流" width="820">
+</p>
+
+## ✨ 项目亮点
+
+1. **一句话完成数据分析** — 上传文件、用自然语言描述需求，Agent 自动生成 Python/SQL 并执行，输出图表和报告。无需写代码、无需懂 SQL、无需懂 DuckDB。
+2. **受治理的语义层（WrenAI 加持）** — 每个上传的文件自动生成 MDL，含字段类型推断、表关系推断、业务列含义登记。所有查询都走语义层，**字段重命名、口径不一致、跨表 JOIN** 等常见 LLM 错误被前置拦掉。
+3. **真实成果，不是样图** — 下方每一张图都是 Agent 在真实 session 里跑出来的，不是手工绘制。
+
+| 六国预期寿命（2019-2023） | 工作日 vs 非工作日骑行 | 美国大学专业薪资 |
+| :---: | :---: | :---: |
+| ![](DeepAnalyze/assets/demo_life_expectancy.png) | ![](DeepAnalyze/assets/demo_bikesharing.png) | ![](DeepAnalyze/assets/demo_majors.png) |
+| *"2019-2023 六个国家（中国、美国、印度、日本、巴西、南非）预期寿命变化与是否恢复"* | *"工作日和非工作日的骑行高峰时段以及 24 小时使用模式差异"* | *"查找 median 不低于 50000 且 unemployment_rate 低于 0.05 的专业"* |
+
+4. **多用户隔离 + 跨会话复用** — 注册账号、登录后会话与历史**按用户严格隔离**（路径：`workspace/u<用户>__...`）。同一用户的不同 session **共享查询记忆**：上次跑成功的"按销售员汇总销售额"，下次开新 session 问类似问题会自动作为参考召回，省去重复摸索。
+5. **受治理的代码执行** — 默认 Docker 沙箱（文件大小受限、网络可选）；可选本地模式（开发调试）。单次执行 120 秒超时，单会话最多 12 轮 / 15 分钟。
+6. **分析师级报告导出** — 一键导出 **PDF**（依赖 Pandoc + xelatex）或 **Markdown** 报告，含图表、表格、代码、解读。
+
+<p align="center">
+  <img src="DeepAnalyze/assets/report.png" alt="DeepAnalyze 报告样例" width="720">
+</p>
+
+---
+
 ## 架构
 
 ```
